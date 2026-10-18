@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -68,10 +69,15 @@ func (t *BashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	defer cancel()
 
 	shell := "sh"
+	shellArgs := []string{"-c", command}
 	if path, err := exec.LookPath("bash"); err == nil {
 		shell = path
+	} else if runtime.GOOS == "windows" {
+		// native fallback when no bash (e.g. Git Bash) is installed
+		shell = "cmd"
+		shellArgs = []string{"/c", command}
 	}
-	cmd := exec.CommandContext(ctx, shell, "-c", command)
+	cmd := exec.CommandContext(ctx, shell, shellArgs...)
 	cmd.Dir = t.Root
 	stdout := newLimitedBuffer(1024 * 1024)
 	stderr := newLimitedBuffer(1024 * 1024)

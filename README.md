@@ -47,12 +47,30 @@ edited, so the model can't blind-overwrite work it has never seen.
 
 ## Install
 
-Requires Go 1.24+.
+**Prebuilt binary** — Linux and macOS (amd64/arm64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/turnlith-AI/turnlith-CLI/main/install.sh | sh
+```
+
+The script verifies the release checksum and installs to `~/.local/bin/tlc`
+(`TLC_INSTALL_DIR` and `TLC_VERSION` override the destination and version).
+Windows builds and manual downloads live on the
+[releases page](https://github.com/turnlith-AI/turnlith-CLI/releases); on
+Windows the Bash tool uses `cmd.exe` unless Git Bash is installed.
+
+**With Go 1.24+:**
+
+```sh
+go install github.com/turnlith-AI/turnlith-CLI/cmd/tlc@latest
+```
+
+**From source:**
 
 ```sh
 git clone https://github.com/turnlith-AI/turnlith-CLI
 cd turnlith-CLI
-make install           # builds to ~/.local/bin/tlc
+make install           # builds to ~/.local/bin/tlc (override with PREFIX=…)
 ```
 
 or run it without installing:
@@ -138,4 +156,4 @@ internal/config/    shared connection file + tlc preferences
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

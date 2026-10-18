@@ -1,0 +1,81 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          name="tlc_${GITHUB_REF_NAME#v}_${GOOS}_${GOARCH}"
+          mkdir -p "dist/$name"
+          if [ "$GOOS" = "windows" ]; then
+            go build -trimpath -ldflags "-s -w" -o "dist/$name/tlc.exe" ./cmd/tlc
+            (cd dist && zip -q -r "$name.zip" "$name")
+          else
+            go build -trimpath -ldflags "-s -w" -o "dist/$name/tlc" ./cmd/tlc
+            (cd dist && tar -czf "$name.tar.gz" "$name")
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tlc-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches internal/version
+        run: |
+          set -eu
+          want="${GITHUB_REF_NAME#v}"
+          got="$(grep -o 'Version = "[^"]*"' internal/version/version.go | cut -d'"' -f2)"
+          if [ "$want" != "$got" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version.go ($got)" >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum tlc_* > sha256sums.txt
+          cat sha256sums.txt
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "tlc ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            dist/*
