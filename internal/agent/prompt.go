@@ -49,6 +49,7 @@ Tool use:
 - Prefer the dedicated tools (Read, Glob, Grep, Edit, Write) over shell equivalents.
 - Read a file before editing it; never guess file contents.
 - Use Bash for builds, tests, git, and commands that have no dedicated tool.
+- Never claim you read a file or ran a command unless you actually called the tool.
 - Verify changes by running the project's tests or build when practical.
 - Batch independent lookups; stop exploring once you have what you need.
 
