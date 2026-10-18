@@ -1,0 +1,173 @@
+// Package config resolves the connection tlc uses to reach a turnlith
+// server. The connection (baseUrl + apiKey) is the same file `tlith
+// configure` writes, so one setup serves both CLIs; tlc-specific preferences
+// live next to it in tlc.json.
+package config
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const (
+	EnvBaseURL = "TLITH_BASE_URL"
+	EnvAPIKey  = "TLITH_API_KEY"
+	EnvAgent   = "TLC_AGENT"
+)
+
+// Connection is the server + credential pair.
+type Connection struct {
+	BaseURL string
+	APIKey  string
+}
+
+// Prefs are tlc-local preferences.
+type Prefs struct {
+	DefaultAgent string `json:"defaultAgent,omitempty"`
+}
+
+// ErrNotConfigured reports a missing connection with setup guidance.
+type ErrNotConfigured struct{ Path string }
+
+func (e *ErrNotConfigured) Error() string {
+	return fmt.Sprintf(
+		"not connected to a turnlith server yet — run `tlc configure --base-url <url> --api-key sk-…`\n"+
+			"(or `tlith configure …`); expected connection at %s", e.Path)
+}
+
+func configDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "tlith")
+}
+
+// ConnectionPath is the shared tlith connection file.
+func ConnectionPath() string { return filepath.Join(configDir(), "config.json") }
+
+// PrefsPath is tlc's own preferences file.
+func PrefsPath() string { return filepath.Join(configDir(), "tlc.json") }
+
+// StateDir is where transcripts live.
+func StateDir() string {
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".local", "share")
+	}
+	dir := filepath.Join(base, "tlith", "tlc")
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
+}
+
+// NormalizeBaseURL trims whitespace and trailing slashes and adds a scheme
+// when one is missing (https, except for localhost).
+func NormalizeBaseURL(raw string) string {
+	url := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if url == "" {
+		return ""
+	}
+	if !strings.Contains(url, "://") {
+		host := url
+		if i := strings.IndexByte(host, '/'); i >= 0 {
+			host = host[:i]
+		}
+		scheme := "https"
+		if strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1") || strings.HasPrefix(host, "[::1]") {
+			scheme = "http"
+		}
+		url = scheme + "://" + url
+	}
+	return url
+}
+
+// LoadConnection resolves the connection: environment first, then the shared
+// config file.
+func LoadConnection() (Connection, error) {
+	conn := Connection{
+		BaseURL: NormalizeBaseURL(os.Getenv(EnvBaseURL)),
+		APIKey:  strings.TrimSpace(os.Getenv(EnvAPIKey)),
+	}
+	if conn.BaseURL != "" && conn.APIKey != "" {
+		return conn, nil
+	}
+	file, err := readConnectionFile()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Connection{}, &ErrNotConfigured{Path: ConnectionPath()}
+		}
+		return Connection{}, err
+	}
+	if conn.BaseURL == "" {
+		conn.BaseURL = NormalizeBaseURL(file.BaseURL)
+	}
+	if conn.APIKey == "" {
+		conn.APIKey = strings.TrimSpace(file.APIKey)
+	}
+	if conn.BaseURL == "" || conn.APIKey == "" {
+		return Connection{}, &ErrNotConfigured{Path: ConnectionPath()}
+	}
+	return conn, nil
+}
+
+func readConnectionFile() (Connection, error) {
+	data, err := os.ReadFile(ConnectionPath())
+	if err != nil {
+		return Connection{}, err
+	}
+	var conn Connection
+	if err := json.Unmarshal(data, &conn); err != nil {
+		return Connection{}, fmt.Errorf("invalid config at %s: %w", ConnectionPath(), err)
+	}
+	return conn, nil
+}
+
+// SaveConnection writes the shared connection file (mode 600), preserving
+// keys other tools may have stored there.
+func SaveConnection(conn Connection) (string, error) {
+	path := ConnectionPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	fields := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &fields)
+	}
+	fields["baseUrl"] = conn.BaseURL
+	fields["apiKey"] = conn.APIKey
+	data, err := json.MarshalIndent(fields, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// LoadPrefs never fails; unreadable prefs are treated as empty.
+func LoadPrefs() Prefs {
+	var prefs Prefs
+	if data, err := os.ReadFile(PrefsPath()); err == nil {
+		_ = json.Unmarshal(data, &prefs)
+	}
+	return prefs
+}
+
+// SavePrefs persists tlc preferences.
+func SavePrefs(prefs Prefs) error {
+	path := PrefsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(prefs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
+}
