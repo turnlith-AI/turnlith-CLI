@@ -45,7 +45,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: tlc-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
           if-no-files-found: error
 
   publish:
@@ -69,7 +71,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum tlc_* > sha256sums.txt
+          sha256sum *.tar.gz *.zip > sha256sums.txt
           cat sha256sums.txt
       - name: Create the GitHub release
         env:
