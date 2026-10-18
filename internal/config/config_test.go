@@ -3,8 +3,45 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// isolate points the config location at a temp dir on every platform. Setting
+// HOME as well keeps macOS hermetic (os.UserConfigDir ignores XDG there; tlc
+// does not, but tests should not depend on that distinction).
+func isolate(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	return home
+}
+
+func TestConfigDirMatchesTlith(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses HOME semantics")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if got, want := ConnectionPath(), filepath.Join(home, ".config", "tlith", "config.json"); got != want {
+		t.Errorf("fallback path = %q, want %q", got, want)
+	}
+
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if got, want := ConnectionPath(), filepath.Join(xdg, "tlith", "config.json"); got != want {
+		t.Errorf("xdg path = %q, want %q", got, want)
+	}
+
+	// a relative XDG_CONFIG_HOME is ignored, like the tlith CLI does
+	t.Setenv("XDG_CONFIG_HOME", "relative/config")
+	if got, want := ConnectionPath(), filepath.Join(home, ".config", "tlith", "config.json"); got != want {
+		t.Errorf("relative-xdg path = %q, want %q", got, want)
+	}
+}
 
 func TestNormalizeBaseURL(t *testing.T) {
 	cases := map[string]string{
@@ -23,7 +60,7 @@ func TestNormalizeBaseURL(t *testing.T) {
 }
 
 func TestConnectionRoundTrip(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	isolate(t)
 	t.Setenv(EnvBaseURL, "")
 	t.Setenv(EnvAPIKey, "")
 
@@ -65,7 +102,7 @@ func TestConnectionRoundTrip(t *testing.T) {
 }
 
 func TestPrefsRoundTrip(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	isolate(t)
 	prefs := LoadPrefs()
 	if prefs.DefaultAgent != "" {
 		t.Fatalf("prefs = %+v", prefs)

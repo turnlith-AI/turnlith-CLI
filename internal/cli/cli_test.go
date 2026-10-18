@@ -256,10 +256,12 @@ func readFile(t *testing.T, f *os.File) string {
 	return string(data)
 }
 
-// setupEnv makes the run hermetic: connection via environment, config and
-// transcripts under the test's temp dirs, no lingering agent choice.
+// setupEnv makes the run hermetic: connection via environment, config,
+// preferences, and transcripts under temp dirs, no lingering agent choice.
+// HOME is redirected too, because macOS resolves ~/.config from it directly.
 func setupEnv(t *testing.T, baseURL string) {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("TLITH_BASE_URL", baseURL)
 	t.Setenv("TLITH_API_KEY", "sk-test-key")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -305,6 +307,7 @@ func TestUnknownFlagExits2(t *testing.T) {
 }
 
 func TestNotConfigured(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("TLITH_BASE_URL", "")
 	t.Setenv("TLITH_API_KEY", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

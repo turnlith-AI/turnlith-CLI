@@ -38,13 +38,19 @@ func (e *ErrNotConfigured) Error() string {
 			"(or `tlith configure …`); expected connection at %s", e.Path)
 }
 
+// configDir mirrors the tlith setup CLI's resolution exactly (see
+// packages/cli/src/config.ts): $XDG_CONFIG_HOME when it is an absolute path,
+// otherwise ~/.config — on every platform, macOS included, so both CLIs read
+// the same connection file.
 func configDir() string {
-	dir, err := os.UserConfigDir()
-	if err != nil || dir == "" {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".config")
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(xdg) {
+		return filepath.Join(xdg, "tlith")
 	}
-	return filepath.Join(dir, "tlith")
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "."
+	}
+	return filepath.Join(home, ".config", "tlith")
 }
 
 // ConnectionPath is the shared tlith connection file.
