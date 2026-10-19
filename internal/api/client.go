@@ -111,13 +111,38 @@ func (c *Client) Health(ctx context.Context) error {
 	return c.Do(ctx, http.MethodGet, "/health", nil, nil)
 }
 
+// ListModels fetches GET /v1/models: the org's agents, the pickable model
+// catalog, and per-provider capabilities (reasoning effort).
+func (c *Client) ListModels(ctx context.Context) (ModelsResponse, error) {
+	var models ModelsResponse
+	err := c.Do(ctx, http.MethodGet, "/v1/models", nil, &models)
+	return models, err
+}
+
 // ListAgents fetches GET /v1/models and returns the org's agents.
 func (c *Client) ListAgents(ctx context.Context) ([]Agent, error) {
-	var models ModelsResponse
-	if err := c.Do(ctx, http.MethodGet, "/v1/models", nil, &models); err != nil {
+	models, err := c.ListModels(ctx)
+	if err != nil {
 		return nil, err
 	}
 	return models.Agents, nil
+}
+
+// CreateAgent creates an agent (POST /v1/agents). Agent management is
+// admin-gated: an agent-role key gets a 403 back.
+func (c *Client) CreateAgent(ctx context.Context, input CreateAgentInput) (Agent, error) {
+	var agent Agent
+	err := c.Do(ctx, http.MethodPost, "/v1/agents", input, &agent)
+	return agent, err
+}
+
+// UpdateAgentConfig patches an agent's model and reasoning effort
+// (PATCH /v1/agents/:id); the level is always set, nil clearing it. The
+// server mirrors the change onto the agent's live session.
+func (c *Client) UpdateAgentConfig(ctx context.Context, id string, patch AgentConfigPatch) (Agent, error) {
+	var agent Agent
+	err := c.Do(ctx, http.MethodPatch, "/v1/agents/"+id, patch, &agent)
+	return agent, err
 }
 
 // StreamHandlers receives incremental output while a turn streams.

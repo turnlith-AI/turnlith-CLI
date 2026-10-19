@@ -26,15 +26,41 @@ type REPL struct {
 	renderer *Renderer
 	theme    *Theme
 	out      io.Writer
+
+	// candidates supplies argument completions for slash commands (agent
+	// codenames, model ids, effort levels); nil completes command names only.
+	candidates func(before, prefix string) []string
 }
 
+// SetCandidates wires the argument completions the ui package cannot know.
+func (r *REPL) SetCandidates(fn func(before, prefix string) []string) { r.candidates = fn }
+
 func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
+	r := &REPL{renderer: renderer, theme: theme, out: renderer.Out}
+	// The listener needs the instance it is installed on; it is only invoked
+	// while reading a line, after NewEx returned, so the late assignment is safe.
+	var instance *readline.Instance
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "> ",
 		HistoryFile:     filepath.Join(config.StateDir(), "history"),
 		HistoryLimit:    1000,
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
+		AutoComplete: completer{extra: func(before, prefix string) []string {
+			if r.candidates == nil {
+				return nil
+			}
+			return r.candidates(before, prefix)
+		}},
+		Listener: func(line []rune, pos int, key rune) ([]rune, int, bool) {
+			// "/" opening a fresh command line: suggest the commands above the
+			// prompt. Write goes through readline's prompt-aware writer, so the
+			// input line is redrawn cleanly below the menu.
+			if key == '/' && len(line) == 1 && instance != nil {
+				_, _ = instance.Write([]byte(SuggestText(r.theme)))
+			}
+			return nil, 0, false
+		},
 		FuncFilterInputRune: func(r rune) (rune, bool) {
 			if r == '\n' {
 				return newlinePlaceholder, true
@@ -45,7 +71,9 @@ func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &REPL{rl: rl, renderer: renderer, theme: theme, out: renderer.Out}, nil
+	r.rl = rl
+	instance = rl
+	return r, nil
 }
 
 // ErrInterrupt reports Ctrl-C at the prompt.

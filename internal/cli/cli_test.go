@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/turnlith-AI/turnlith-CLI/internal/agent"
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
+	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
+	"github.com/turnlith-AI/turnlith-CLI/internal/ui"
 	"github.com/turnlith-AI/turnlith-CLI/internal/version"
 )
 
@@ -35,35 +39,72 @@ type mcpCall struct {
 }
 
 // mockServer stands in for a turnlith server: /v1/models, /health, the
-// streamed chat facade, and the stateless MCP endpoint.
+// streamed chat facade, the stateless MCP endpoint, and agent management.
 type mockServer struct {
 	*httptest.Server
 
-	agents  []api.Agent
-	chatFn  func(turn int, body api.ChatRequest) []string
-	mcpText string
+	agents    []api.Agent
+	providers []api.ProviderStatus
+	catalog   []api.CatalogModel
+	chatFn    func(turn int, body api.ChatRequest) []string
+	mcpText   string
 
 	mu       sync.Mutex
 	turns    int
 	chats    []api.ChatRequest
 	methods  []string
 	mcpCalls []mcpCall
+
+	nextID  int
+	creates []api.CreateAgentInput
+	patches []map[string]any
+}
+
+// testProviders is the per-provider capability fixture: gemini and openai
+// expose reasoning levels (minimal sets come from the server's defs.ts),
+// groq has no reasoning control.
+func testProviders() []api.ProviderStatus {
+	return []api.ProviderStatus{
+		{Provider: "gemini", Available: true, Source: "env", ReasoningEfforts: []string{"minimal", "low", "medium", "high"}},
+		{Provider: "openai", Available: true, Source: "env", ReasoningEfforts: []string{"none", "minimal", "low", "medium", "high", "xhigh"}},
+		{Provider: "groq", Available: true, Source: "env"},
+	}
+}
+
+// testCatalog is the pickable-model fixture, including one unavailable entry.
+func testCatalog() []api.CatalogModel {
+	return []api.CatalogModel{
+		{ID: "gemini:gemini-3.8-flash", Label: "Gemini 3.8 Flash", Provider: "gemini", Available: true, Source: "catalog"},
+		{ID: "openai:gpt-6-sol", Label: "GPT-6 Sol", Provider: "openai", Available: true, Source: "catalog"},
+		{ID: "groq:llama-4-scout", Label: "Llama 4 Scout", Provider: "groq", Available: true, Source: "catalog"},
+		{ID: "openai:gpt-6-luna", Label: "GPT-6 Luna", Provider: "openai", Available: false, Source: "catalog"},
+	}
 }
 
 func newMockServer(t *testing.T, agents []api.Agent, chatFn func(turn int, body api.ChatRequest) []string) *mockServer {
 	t.Helper()
-	m := &mockServer{agents: agents, chatFn: chatFn}
+	m := &mockServer{agents: agents, chatFn: chatFn, providers: testProviders(), catalog: testCatalog()}
 
 	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
 			writeJSON(w, map[string]any{"status": "ok"})
 		case "/v1/models":
-			data := make([]map[string]string, 0, len(m.agents))
-			for _, a := range m.agents {
+			m.mu.Lock()
+			agents := append([]api.Agent(nil), m.agents...)
+			m.mu.Unlock()
+			data := make([]map[string]string, 0, len(agents))
+			for _, a := range agents {
 				data = append(data, map[string]string{"id": a.Codename, "object": "model"})
 			}
-			writeJSON(w, map[string]any{"data": data, "agents": m.agents})
+			writeJSON(w, map[string]any{
+				"data":      data,
+				"agents":    agents,
+				"providers": m.providers,
+				"models":    m.catalog,
+			})
+		case "/v1/agents":
+			m.handleAgentCreate(w, r)
 		case "/v1/chat/completions":
 			var body api.ChatRequest
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -88,11 +129,97 @@ func newMockServer(t *testing.T, agents []api.Agent, chatFn func(turn int, body 
 		case "/v1/mcp":
 			m.handleMCP(w, r)
 		default:
+			if r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/agents/") {
+				m.handleAgentPatch(w, r)
+				return
+			}
 			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(m.Close)
 	return m
+}
+
+// handleAgentCreate answers POST /v1/agents: it records the body and returns
+// the created agent, generating a codename when none was given.
+func (m *mockServer) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	var input api.CreateAgentInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, `{"error":{"message":"bad request"}}`, http.StatusBadRequest)
+		return
+	}
+	agent := api.Agent{ID: "", Codename: input.Codename, Model: input.Model}
+	if input.Label != "" {
+		agent.Label = &input.Label
+	}
+	if input.ReasoningEffort != "" {
+		effort := input.ReasoningEffort
+		agent.ReasoningEffort = &effort
+	}
+	m.mu.Lock()
+	m.nextID++
+	m.creates = append(m.creates, input)
+	if agent.Codename == "" {
+		agent.Codename = fmt.Sprintf("auto-%d", m.nextID)
+	}
+	agent.ID = fmt.Sprintf("agent-%d", 100+m.nextID)
+	m.agents = append(m.agents, agent)
+	m.mu.Unlock()
+
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(agent)
+}
+
+// handleAgentPatch answers PATCH /v1/agents/:id with the same merge semantics
+// the server has: an explicit null effort clears it.
+func (m *mockServer) handleAgentPatch(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/v1/agents/")
+	var patch map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		http.Error(w, `{"error":{"message":"bad request"}}`, http.StatusBadRequest)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.patches = append(m.patches, patch)
+	for i := range m.agents {
+		if m.agents[i].ID != id {
+			continue
+		}
+		if model, ok := patch["model"].(string); ok && model != "" {
+			m.agents[i].Model = model
+		}
+		if raw, ok := patch["reasoningEffort"]; ok {
+			if raw == nil {
+				m.agents[i].ReasoningEffort = nil
+			} else if level, ok := raw.(string); ok {
+				m.agents[i].ReasoningEffort = &level
+			}
+		}
+		updated := m.agents[i]
+		writeJSON(w, updated)
+		return
+	}
+	http.Error(w, `{"error":{"message":"agent not found","code":"model_not_found"}}`, http.StatusNotFound)
+}
+
+// createdAgents returns the POST /v1/agents bodies seen so far.
+func (m *mockServer) createdAgents() []api.CreateAgentInput {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]api.CreateAgentInput(nil), m.creates...)
+}
+
+// agentPatches returns the PATCH /v1/agents/:id bodies seen so far.
+func (m *mockServer) agentPatches() []map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]map[string]any(nil), m.patches...)
 }
 
 func (m *mockServer) handleMCP(w http.ResponseWriter, r *http.Request) {
@@ -559,4 +686,310 @@ func TestSearchMemoryToolUsesMCP(t *testing.T) {
 	tool := lastMessage(t, reqs[1])
 	mustContain(t, "memory result", tool.Content.(string), "[agent sigma]")
 	mustContain(t, "memory result", tool.Content.(string), "make release")
+}
+
+// --------------------------------------------------------- agent management
+
+// testApp wires the fields the management handlers touch, with output captured
+// in a buffer instead of a terminal.
+func testApp(t *testing.T, baseURL string, agents []api.Agent) (*app, *strings.Builder) {
+	t.Helper()
+	out := &strings.Builder{}
+	theme := &ui.Theme{}
+	a := &app{
+		client:   api.New(baseURL, "sk-test-key"),
+		agents:   agents,
+		agent:    agents[0],
+		theme:    theme,
+		renderer: ui.NewRenderer(out, theme),
+		runner:   &agent.Runner{},
+	}
+	a.policy = &permissions.Policy{}
+	return a, out
+}
+
+func TestParseAgentsCreateSubcommands(t *testing.T) {
+	opts, err := parseArgs([]string{"agents", "create", "--name", "tlc-test", "--model", "openai:gpt-6-sol", "--effort", "high", "--label", "TLC test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.command != "agents-create" {
+		t.Fatalf("command = %q", opts.command)
+	}
+	if opts.name != "tlc-test" || opts.label != "TLC test" || opts.model != "openai:gpt-6-sol" || opts.effort != "high" {
+		t.Fatalf("flags = %+v", opts)
+	}
+
+	opts, err = parseArgs([]string{"agents", "new", "--model=x"})
+	if err != nil || opts.command != "agents-create" || opts.model != "x" {
+		t.Fatalf("agents new: opts=%+v err=%v", opts, err)
+	}
+
+	opts, err = parseArgs([]string{"agents", "list"})
+	if err != nil || opts.command != "agents" {
+		t.Fatalf("agents list: opts=%+v err=%v", opts, err)
+	}
+
+	if _, err := parseArgs([]string{"agents", "bogus"}); err == nil {
+		t.Fatal("unknown subcommand was accepted")
+	}
+	if _, err := parseArgs([]string{"agents", "create", "make", "it", "good"}); err == nil {
+		t.Fatal("positional prompt was accepted by agents create")
+	}
+}
+
+func TestAgentsCreatePostsFlags(t *testing.T) {
+	srv := newMockServer(t, testAgents(), nil)
+	setupEnv(t, srv.URL)
+
+	res := runTLC(t, t.TempDir(), "agents", "create",
+		"--name", "tlc-test", "--label", "TLC test",
+		"--model", "openai:gpt-6-sol", "--effort", "high")
+	if res.code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", res.code, res.stdout, res.stderr)
+	}
+	mustContain(t, "stdout", res.stdout, "created agent tlc-test")
+	mustContain(t, "stdout", res.stdout, "openai:gpt-6-sol · effort high")
+	mustContain(t, "stdout", res.stdout, "tlc --agent tlc-test")
+
+	created := srv.createdAgents()
+	if len(created) != 1 {
+		t.Fatalf("create calls = %d", len(created))
+	}
+	in := created[0]
+	if in.Codename != "tlc-test" || in.Label != "TLC test" || in.Model != "openai:gpt-6-sol" || in.ReasoningEffort != "high" {
+		t.Fatalf("create body = %+v", in)
+	}
+}
+
+func TestAgentsCreateGeneratesCodename(t *testing.T) {
+	srv := newMockServer(t, testAgents(), nil)
+	setupEnv(t, srv.URL)
+
+	res := runTLC(t, t.TempDir(), "agents", "create", "--model", "gemini:gemini-3.8-flash")
+	if res.code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", res.code, res.stdout, res.stderr)
+	}
+	mustContain(t, "stdout", res.stdout, "created agent auto-1")
+	if created := srv.createdAgents(); len(created) != 1 || created[0].Codename != "" {
+		t.Fatalf("create bodies = %+v", created)
+	}
+}
+
+func TestAgentsCreateNeedsModelOffTTY(t *testing.T) {
+	srv := newMockServer(t, testAgents(), nil)
+	setupEnv(t, srv.URL)
+
+	res := runTLC(t, t.TempDir(), "agents", "create")
+	if res.code != 1 {
+		t.Fatalf("code=%d stdout=%q", res.code, res.stdout)
+	}
+	mustContain(t, "stdout", res.stdout, "--model is required")
+	if len(srv.createdAgents()) != 0 {
+		t.Fatal("a create was attempted without a model")
+	}
+}
+
+func TestAgentsCreateRejectsBadCodenameAndEffort(t *testing.T) {
+	srv := newMockServer(t, testAgents(), nil)
+	setupEnv(t, srv.URL)
+
+	res := runTLC(t, t.TempDir(), "agents", "create", "--name", "Not-Allowed", "--model", "gemini:gemini-3.8-flash")
+	if res.code != 1 {
+		t.Fatalf("code=%d", res.code)
+	}
+	mustContain(t, "stdout", res.stdout, "not usable")
+
+	// groq has no reasoning control: asking for a level must fail before the
+	// POST, with the provider named.
+	res = runTLC(t, t.TempDir(), "agents", "create", "--model", "groq:llama-4-scout", "--effort", "high")
+	if res.code != 1 {
+		t.Fatalf("code=%d", res.code)
+	}
+	mustContain(t, "stdout", res.stdout, "no reasoning control")
+	if len(srv.createdAgents()) != 0 {
+		t.Fatal("invalid effort still reached the server")
+	}
+}
+
+func TestAgentsCreateExplainsAgentRoleKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			writeJSON(w, map[string]any{"data": []any{}, "agents": testAgents(), "providers": testProviders(), "models": testCatalog()})
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"message":"admin role required","code":"forbidden"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	setupEnv(t, srv.URL)
+
+	res := runTLC(t, t.TempDir(), "agents", "create", "--model", "gemini:gemini-3.8-flash")
+	if res.code != 1 {
+		t.Fatalf("code=%d", res.code)
+	}
+	mustContain(t, "stdout", res.stdout, "admin-role key")
+}
+
+func TestModelCommandPatchesAgentAndEffort(t *testing.T) {
+	srv := newMockServer(t, testAgents(), nil)
+	a, out := testApp(t, srv.URL, testAgents())
+
+	if err := a.handleModel([]string{"/model", "openai:gpt-6-sol", "high"}); err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, "output", out.String(), "openai:gpt-6-sol · effort high")
+	if a.agent.Model != "openai:gpt-6-sol" || currentEffort(a.agent) != "high" {
+		t.Fatalf("local agent = %+v", a.agent)
+	}
+	patches := srv.agentPatches()
+	if len(patches) != 1 {
+		t.Fatalf("patches = %+v", patches)
+	}
+	if patches[0]["model"] != "openai:gpt-6-sol" || patches[0]["reasoningEffort"] != "high" {
+		t.Fatalf("patch body = %+v", patches[0])
+	}
+}
+
+func TestModelCommandClearsUnsupportedEffort(t *testing.T) {
+	agents := testAgents()
+	effort := "high"
+	agents[0].ReasoningEffort = &effort
+	srv := newMockServer(t, agents, nil)
+	a, out := testApp(t, srv.URL, agents)
+
+	// groq:llama-4-scout is reachable but has no reasoning knob: the stored
+	// level must be dropped, not carried over.
+	if err := a.handleModel([]string{"/model", "groq:llama-4-scout"}); err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, "output", out.String(), "provider default")
+	if currentEffort(a.agent) != "" {
+		t.Fatalf("effort survived the switch: %+v", a.agent.ReasoningEffort)
+	}
+	patches := srv.agentPatches()
+	if len(patches) != 1 {
+		t.Fatalf("patches = %+v", patches)
+	}
+	raw, present := patches[0]["reasoningEffort"]
+	if !present || raw != nil {
+		t.Fatalf("patch should send an explicit null effort: %+v", patches[0])
+	}
+}
+
+func TestModelCommandKeepsSupportedEffort(t *testing.T) {
+	agents := testAgents()
+	effort := "low"
+	agents[0].ReasoningEffort = &effort
+	srv := newMockServer(t, agents, nil)
+	a, _ := testApp(t, srv.URL, agents)
+
+	// gemini → openai keeps a level both providers accept.
+	if err := a.handleModel([]string{"/model", "openai:gpt-6-sol"}); err != nil {
+		t.Fatal(err)
+	}
+	patches := srv.agentPatches()
+	if len(patches) != 1 || patches[0]["reasoningEffort"] != "low" {
+		t.Fatalf("patches = %+v", patches)
+	}
+}
+
+func TestModelCommandRejectsUnavailableModel(t *testing.T) {
+	srv := newMockServer(t, testAgents(), nil)
+	a, _ := testApp(t, srv.URL, testAgents())
+
+	err := a.handleModel([]string{"/model", "openai:gpt-6-luna"})
+	if err == nil {
+		t.Fatal("an unavailable model was accepted")
+	}
+	mustContain(t, "error", err.Error(), "not available")
+	if len(srv.agentPatches()) != 0 {
+		t.Fatal("a patch was sent for an unavailable model")
+	}
+}
+
+func TestEffortCommandSetsAndClears(t *testing.T) {
+	srv := newMockServer(t, testAgents(), nil)
+	a, _ := testApp(t, srv.URL, testAgents())
+
+	if err := a.handleEffort([]string{"/effort", "medium"}); err != nil {
+		t.Fatal(err)
+	}
+	if currentEffort(a.agent) != "medium" || a.agent.Model != "gemini:gemini-3.8-flash" {
+		t.Fatalf("agent = %+v", a.agent)
+	}
+
+	if err := a.handleEffort([]string{"/effort", "default"}); err != nil {
+		t.Fatal(err)
+	}
+	if currentEffort(a.agent) != "" {
+		t.Fatalf("default did not clear the level: %+v", a.agent)
+	}
+
+	err := a.handleEffort([]string{"/effort", "xhigh"})
+	if err == nil {
+		t.Fatal("gemini accepted xhigh")
+	}
+	mustContain(t, "error", err.Error(), "supported: minimal, low, medium, high")
+
+	patches := srv.agentPatches()
+	if len(patches) != 2 {
+		t.Fatalf("patches = %+v", patches)
+	}
+	if raw, present := patches[1]["reasoningEffort"]; !present || raw != nil {
+		t.Fatalf("clearing should send an explicit null: %+v", patches[1])
+	}
+}
+
+func TestEffortPickerDefaultIsExplicit(t *testing.T) {
+	// the picker's "provider default" entry returns "" — it must be read as an
+	// explicit reset, never as "no argument given" (which keeps the level)
+	if got := pickEffortArg(""); got != "default" {
+		t.Fatalf("picker default = %q, want %q", got, "default")
+	}
+	if got := pickEffortArg("high"); got != "high" {
+		t.Fatalf("picker level = %q, want %q", got, "high")
+	}
+}
+
+func TestEffortCommandRefusesKnoblessProvider(t *testing.T) {
+	agents := testAgents()
+	agents[0].Model = "groq:llama-4-scout"
+	srv := newMockServer(t, agents, nil)
+	a, _ := testApp(t, srv.URL, agents)
+
+	err := a.handleEffort([]string{"/effort", "low"})
+	if err == nil {
+		t.Fatal("groq accepted an effort")
+	}
+	mustContain(t, "error", err.Error(), "no reasoning control")
+}
+
+func TestCompleteArgumentOffersWorkspaceWords(t *testing.T) {
+	agents := testAgents()
+	agents = append(agents, api.Agent{ID: "agent-2", Codename: "lil-coder", Model: "openai:gpt-6-sol"})
+	a, _ := testApp(t, "http://127.0.0.1:1", agents)
+	a.models = &api.ModelsResponse{Providers: testProviders(), Models: testCatalog()}
+
+	got := a.completeArgument("/agent", "sig")
+	if len(got) != 1 || got[0] != "sigma" {
+		t.Fatalf("agent completion = %v", got)
+	}
+	got = a.completeArgument("/agent", "")
+	if len(got) != 3 || got[0] != "new" {
+		t.Fatalf("agent completion (empty) = %v", got)
+	}
+	// only available catalog entries complete
+	got = a.completeArgument("/model", "openai:")
+	if len(got) != 1 || got[0] != "openai:gpt-6-sol" {
+		t.Fatalf("model completion = %v", got)
+	}
+	got = a.completeArgument("/model gemini:gemini-3.8-flash", "hi")
+	if len(got) != 1 || got[0] != "high" {
+		t.Fatalf("model effort completion = %v", got)
+	}
+	got = a.completeArgument("/effort", "min")
+	if len(got) != 1 || got[0] != "minimal" {
+		t.Fatalf("effort completion = %v", got)
+	}
 }

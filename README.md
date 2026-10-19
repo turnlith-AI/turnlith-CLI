@@ -90,9 +90,10 @@ tlc configure --base-url http://turnlith.com --api-key sk-…
 ```
 
 `tlc configure` verifies the server's health endpoint and your key before
-saving. The api key needs a **agent role** (create keys in the turnlith web
-console). Environment overrides `TLITH_BASE_URL` / `TLITH_API_KEY` win over
-the file, for CI or throwaway runs.
+saving. Chatting needs an **agent-role** key; creating agents or switching a
+model/effort needs an **admin-role** key (both are minted in the turnlith web
+console, under API keys). Environment overrides `TLITH_BASE_URL` /
+`TLITH_API_KEY` win over the file, for CI or throwaway runs.
 
 ## Usage
 
@@ -103,11 +104,20 @@ tlc -p "explain main.go"     # one-shot: answer on stdout, activity on stderr
 tlc -c                       # continue the previous conversation here
 tlc --agent sigma            # pick the agent (model) explicitly
 tlc agents                   # list the workspace's agents
+tlc agents create            # create an agent (ask-first wizard on a terminal)
 ```
 
 `--agent` matters: memory, transcripts, and billing are per agent. The
 default agent is remembered in `~/.config/tlith/tlc.json`, overridable with
 `TLC_AGENT`.
+
+Creating an agent works interactively (the codename, model, and — when the
+provider supports it — reasoning effort are asked for) or entirely from flags:
+
+```sh
+tlc agents create --name bug-hunter --label "Bug hunter" \
+                  --model openai:gpt-6-sol --effort high
+```
 
 | Flag              | Meaning                                                     |
 | ----------------- | ----------------------------------------------------------- |
@@ -118,9 +128,17 @@ default agent is remembered in `~/.config/tlith/tlc.json`, overridable with
 | `--verbose`       | show token usage after each turn                             |
 | `--base-url`, `--api-key` | connection overrides for this run                   |
 
-In the REPL: `/help`, `/clear`, `/agent [name]`, `/agents`, `/status`,
-`/verbose`, `/yolo`, `/exit`. `Ctrl-C` interrupts the run in progress;
-another `Ctrl-C` at an empty prompt quits.
+`tlc agents create` takes `--name` (codename clients call; generated when
+omitted), `--label`, `--model`, and `--effort`
+(`none|minimal|low|medium|high|xhigh`).
+
+In the REPL: `/help`, `/clear`, `/agent [name|new]`, `/agents`, `/model
+[spec] [effort]`, `/effort [level]`, `/status`, `/verbose`, `/yolo`, `/exit`;
+typing `/` prints the command menu and `TAB` completes commands and their
+arguments (agent codenames, model ids, effort levels). `/model` and `/effort`
+persist on the agent server-side, so the change applies to every client of
+that agent. `Ctrl-C` interrupts the run in progress; another `Ctrl-C` at an
+empty prompt quits.
 
 Local transcripts (display-only — the real memory is on the server) are
 JSONL files under `~/.local/share/tlith/tlc/sessions/`, one per session, so

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/agent"
@@ -33,8 +34,9 @@ Usage:
   tlc --yolo                 skip permission prompts for gated tools
 
 Commands:
-  tlc configure              save the server URL and api key (shared with tlith)
   tlc agents                 list the workspace's agents
+  tlc agents create          create an agent (interactive, needs an admin key)
+  tlc configure              save the server URL and api key (shared with tlith)
   tlc help | version
 
 Options:
@@ -46,13 +48,19 @@ Options:
       --base-url  override the server URL for this run
       --api-key   override the api key for this run
 
+Options for ` + "`tlc agents create`" + `:
+      --name      codename clients call (default: generated)
+      --label     human-readable label
+      --model     model spec, e.g. gemini:gemini-3.8-flash
+      --effort    reasoning effort: none|minimal|low|medium|high|xhigh
+
 Environment: TLITH_BASE_URL, TLITH_API_KEY (connection), TLC_AGENT (default agent)
 
-In the REPL: /help /clear /agent /agents /status /verbose /yolo /exit
+In the REPL: /help /clear /agent /agents /model /effort /status /verbose /yolo /exit
 `
 
 type options struct {
-	command string // "", "configure", "agents", "help", "version"
+	command string // "", "configure", "agents", "agents-create", "help", "version"
 	print   bool
 	cont    bool
 	agent   string
@@ -61,6 +69,12 @@ type options struct {
 	baseURL string
 	apiKey  string
 	prompt  string
+
+	// `tlc agents create`
+	name   string
+	label  string
+	model  string
+	effort string
 }
 
 // Main is the entry point; it returns the process exit code.
@@ -91,6 +105,8 @@ func Main(argv []string) int {
 	switch opts.command {
 	case "agents":
 		return app.cmdAgents()
+	case "agents-create":
+		return app.cmdAgentsCreate()
 	}
 	if opts.print {
 		return app.runPrint()
@@ -109,6 +125,7 @@ func parseArgs(argv []string) (options, error) {
 		return argv[*i], nil
 	}
 	seenPositional := false
+	seenSub := false
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
 		switch {
@@ -132,6 +149,38 @@ func parseArgs(argv []string) (options, error) {
 			opts.agent = v
 		case strings.HasPrefix(arg, "--agent="):
 			opts.agent = strings.TrimPrefix(arg, "--agent=")
+		case arg == "--name":
+			v, err := next(&i, arg)
+			if err != nil {
+				return opts, err
+			}
+			opts.name = v
+		case strings.HasPrefix(arg, "--name="):
+			opts.name = strings.TrimPrefix(arg, "--name=")
+		case arg == "--label":
+			v, err := next(&i, arg)
+			if err != nil {
+				return opts, err
+			}
+			opts.label = v
+		case strings.HasPrefix(arg, "--label="):
+			opts.label = strings.TrimPrefix(arg, "--label=")
+		case arg == "--model":
+			v, err := next(&i, arg)
+			if err != nil {
+				return opts, err
+			}
+			opts.model = v
+		case strings.HasPrefix(arg, "--model="):
+			opts.model = strings.TrimPrefix(arg, "--model=")
+		case arg == "--effort":
+			v, err := next(&i, arg)
+			if err != nil {
+				return opts, err
+			}
+			opts.effort = v
+		case strings.HasPrefix(arg, "--effort="):
+			opts.effort = strings.TrimPrefix(arg, "--effort=")
 		case arg == "--base-url":
 			v, err := next(&i, arg)
 			if err != nil {
@@ -159,11 +208,27 @@ func parseArgs(argv []string) (options, error) {
 				seenPositional = true
 				continue
 			}
+			// one subcommand right after `agents`
+			if opts.command == "agents" && !seenSub && len(promptWords) == 0 {
+				seenSub = true
+				switch arg {
+				case "list":
+					continue
+				case "create", "new":
+					opts.command = "agents-create"
+					continue
+				default:
+					return opts, fmt.Errorf("unknown `agents` subcommand %q — use `tlc agents` or `tlc agents create`", arg)
+				}
+			}
 			seenPositional = true
 			promptWords = append(promptWords, arg)
 		}
 	}
 	opts.prompt = strings.TrimSpace(strings.Join(promptWords, " "))
+	if opts.command == "agents-create" && opts.prompt != "" {
+		return opts, fmt.Errorf("`tlc agents create` takes flags, not a prompt — unexpected %q", opts.prompt)
+	}
 	return opts, nil
 }
 
@@ -182,6 +247,11 @@ type app struct {
 	renderer    *ui.Renderer
 	errRenderer *ui.Renderer
 	repl        *ui.REPL
+
+	// /v1/models cache (agents, catalog, provider capabilities) backing the
+	// model/effort pickers and TAB completion; dropped after mutations.
+	modelsMu sync.Mutex
+	models   *api.ModelsResponse
 
 	cwd        string
 	transcript *history.Session
@@ -224,8 +294,8 @@ func newApp(opts options) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(agents) == 0 {
-		return nil, fmt.Errorf("this workspace has no agents yet — create one at %s (Agents → New agent)", a.client.BaseURL)
+	if len(agents) == 0 && opts.command != "agents-create" {
+		return nil, fmt.Errorf("this workspace has no agents yet — run `tlc agents create` to make one, or use the console at %s (Agents → New agent)", a.client.BaseURL)
 	}
 	a.agents = agents
 
@@ -266,7 +336,7 @@ func (a *app) cmdAgents() int {
 	}
 	a.renderer.Infof("%-*s  %-*s  %s", nameWidth, "CODENAME", labelWidth, "LABEL", "MODEL")
 	for _, ag := range a.agents {
-		a.renderer.Infof("%-*s  %-*s  %s", nameWidth, ag.Codename, labelWidth, label(ag), ag.Model)
+		a.renderer.Infof("%-*s  %-*s  %s", nameWidth, ag.Codename, labelWidth, label(ag), modelNote(ag))
 	}
 	return 0
 }
@@ -331,7 +401,7 @@ func runConfigure(opts options) int {
 	if len(agents) > 0 {
 		renderer.Infof("%s", theme.Dim("run `tlc` to start, or `tlc agents` to list agents"))
 	} else {
-		renderer.Infof("%s", theme.Yellow("no agents exist in this workspace yet — create one in the web console"))
+		renderer.Infof("%s", theme.Yellow("no agents exist in this workspace yet — run `tlc agents create` to make one"))
 	}
 	return 0
 }
@@ -349,6 +419,7 @@ func (a *app) runInteractive() int {
 		return 1
 	}
 	a.repl = repl
+	repl.SetCandidates(a.completeArgument)
 	a.policy.Prompter = repl
 
 	if err := a.chooseAgent(true); err != nil {
@@ -393,7 +464,7 @@ func (a *app) printBanner() {
 	a.renderer.Infof("%s %s · %s · %s",
 		a.theme.BoldAccent("tlc"),
 		a.theme.Dim("v"+version.Version),
-		a.theme.Accent(a.agent.Codename)+a.theme.Dim(" ("+a.agent.Model+")"),
+		a.theme.Accent(a.agent.Codename)+a.theme.Dim(" ("+modelNote(a.agent)+")"),
 		a.theme.Dim(shortPath(a.cwd)),
 	)
 	a.renderer.Infof("%s", a.theme.Faint("type /help for commands · /exit to quit"+(map[bool]string{true: " · permissions off (--yolo)", false: ""}[a.policy.Yolo])))
@@ -539,20 +610,18 @@ func (a *app) handleSlash(line string) bool {
 	case "/exit", "/quit":
 		return true
 	case "/help":
-		a.renderer.Infof("%s", a.theme.Dim(strings.TrimSpace(`
-/help          this help
-/clear         reset the local task history (server memory is kept)
-/agent [name]  switch agent (memory is per agent)
-/agents        list the workspace's agents
-/status        show agent, server, and session details
-/verbose       toggle token usage display
-/yolo          toggle permission prompts off/on
-/exit          quit`)))
+		a.renderer.Infof("%s", a.theme.Dim(ui.HelpText()))
 	case "/clear":
 		a.runner.Reset()
 		a.renderer.Notice("local task history cleared — the agent's server-side memory is kept")
 	case "/agent":
 		if len(fields) > 1 {
+			if strings.EqualFold(fields[1], "new") || strings.EqualFold(fields[1], "create") {
+				if err := a.createAgentInSession(); err != nil {
+					a.renderer.Errorf("%s", friendlyErr(err))
+				}
+				return false
+			}
 			if err := a.setAgentByName(fields[1], true); err != nil {
 				a.renderer.Errorf("%s", friendlyErr(err))
 			}
@@ -561,20 +630,36 @@ func (a *app) handleSlash(line string) bool {
 		if err := a.pickAgent(); err != nil {
 			a.renderer.Errorf("%s", friendlyErr(err))
 		}
+	case "/model":
+		if err := a.handleModel(fields); err != nil {
+			if errors.Is(err, errCancelled) {
+				a.renderer.Notice("model unchanged")
+				return false
+			}
+			a.renderer.Errorf("%s", friendlyErr(err))
+		}
+	case "/effort":
+		if err := a.handleEffort(fields); err != nil {
+			if errors.Is(err, errCancelled) {
+				a.renderer.Notice("effort unchanged")
+				return false
+			}
+			a.renderer.Errorf("%s", friendlyErr(err))
+		}
 	case "/agents":
 		for _, ag := range a.agents {
 			marker := "  "
 			if ag.Codename == a.agent.Codename {
 				marker = a.theme.Green("▸ ")
 			}
-			a.renderer.Infof("%s%-14s %s", marker, ag.Codename, a.theme.Dim(ag.Model))
+			a.renderer.Infof("%s%-14s %s", marker, ag.Codename, a.theme.Dim(modelNote(ag)))
 		}
 	case "/status":
 		key := a.client.APIKey
 		if len(key) > 12 {
 			key = key[:8] + "…" + key[len(key)-4:]
 		}
-		a.renderer.Infof("agent:      %s (%s)", a.agent.Codename, a.agent.Model)
+		a.renderer.Infof("agent:      %s (%s)", a.agent.Codename, modelNote(a.agent))
 		a.renderer.Infof("server:     %s", a.client.BaseURL)
 		a.renderer.Infof("api key:    %s", key)
 		a.renderer.Infof("directory:  %s", a.cwd)
@@ -677,7 +762,7 @@ func (a *app) pickAgent() error {
 		if l := label(ag); l != "-" {
 			opt += " — " + l
 		}
-		opt += a.theme.Dim(" (" + ag.Model + ")")
+		opt += a.theme.Dim(" (" + modelNote(ag) + ")")
 		options = append(options, opt)
 	}
 	idx, err := a.repl.Pick("Select an agent:", options)
@@ -754,6 +839,8 @@ func friendlyErr(err error) string {
 			return "authentication failed — the api key was rejected (run `tlc configure`)"
 		case 402:
 			return "insufficient credits on the turnlith account: " + apiErr.Message
+		case 403:
+			return "this api key cannot manage agents — creating agents, switching models and setting effort need an admin-role key (mint one in the console under API keys, or edit the agent there)"
 		case 404:
 			if apiErr.Code == "model_not_found" {
 				return apiErr.Message + " — run `tlc agents` to list the workspace's agents"
