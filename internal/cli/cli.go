@@ -36,7 +36,9 @@ Usage:
 Commands:
   tlc agents                 list the workspace's agents
   tlc agents create          create an agent (interactive, needs an admin key)
-  tlc configure              save the server URL and api key (shared with tlith)
+  tlc configure              save the server URL and api key
+  tlc install [opencode]     wire the server's agents into opencode (provider + MCP)
+  tlc uninstall [opencode]   remove the turnlith blocks from the opencode config
   tlc help | version
 
 Options:
@@ -54,13 +56,19 @@ Options for ` + "`tlc agents create`" + `:
       --model     model spec, e.g. gemini:gemini-3.8-flash
       --effort    reasoning effort: none|minimal|low|medium|high|xhigh
 
+Options for ` + "`tlc install opencode`" + `:
+      --project       target ./opencode.json in the current directory
+      --provider-id   provider key in the config (default: tlith)
+      --no-mcp        skip the turnlith-controller MCP server block
+      --use-env       write {env:TLITH_API_KEY} instead of embedding the key
+
 Environment: TLITH_BASE_URL, TLITH_API_KEY (connection), TLC_AGENT (default agent)
 
 In the REPL: /help /clear /agent /agents /model /effort /status /verbose /yolo /exit
 `
 
 type options struct {
-	command string // "", "configure", "agents", "agents-create", "help", "version"
+	command string // "", "configure", "agents", "agents-create", "install", "uninstall", "help", "version"
 	print   bool
 	cont    bool
 	agent   string
@@ -75,6 +83,13 @@ type options struct {
 	label  string
 	model  string
 	effort string
+
+	// `tlc install` / `tlc uninstall`
+	harness    string
+	project    bool
+	providerID string
+	noMcp      bool
+	useEnv     bool
 }
 
 // Main is the entry point; it returns the process exit code.
@@ -93,6 +108,10 @@ func Main(argv []string) int {
 		return 0
 	case "configure":
 		return runConfigure(opts)
+	case "install":
+		return runInstall(opts)
+	case "uninstall":
+		return runUninstall(opts)
 	}
 
 	app, err := newApp(opts)
@@ -181,6 +200,20 @@ func parseArgs(argv []string) (options, error) {
 			opts.effort = v
 		case strings.HasPrefix(arg, "--effort="):
 			opts.effort = strings.TrimPrefix(arg, "--effort=")
+		case arg == "--project":
+			opts.project = true
+		case arg == "--provider-id":
+			v, err := next(&i, arg)
+			if err != nil {
+				return opts, err
+			}
+			opts.providerID = v
+		case strings.HasPrefix(arg, "--provider-id="):
+			opts.providerID = strings.TrimPrefix(arg, "--provider-id=")
+		case arg == "--no-mcp":
+			opts.noMcp = true
+		case arg == "--use-env":
+			opts.useEnv = true
 		case arg == "--base-url":
 			v, err := next(&i, arg)
 			if err != nil {
@@ -203,7 +236,8 @@ func parseArgs(argv []string) (options, error) {
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			return opts, fmt.Errorf("unknown flag %q", arg)
 		default:
-			if !seenPositional && (arg == "configure" || arg == "agents" || arg == "help" || arg == "version") {
+			if !seenPositional && (arg == "configure" || arg == "agents" || arg == "help" || arg == "version" ||
+				arg == "install" || arg == "uninstall") {
 				opts.command = arg
 				seenPositional = true
 				continue
@@ -221,6 +255,14 @@ func parseArgs(argv []string) (options, error) {
 					return opts, fmt.Errorf("unknown `agents` subcommand %q — use `tlc agents` or `tlc agents create`", arg)
 				}
 			}
+			// optional harness name right after install/uninstall
+			if (opts.command == "install" || opts.command == "uninstall") && opts.harness == "" && len(promptWords) == 0 {
+				if arg == "opencode" {
+					opts.harness = arg
+					continue
+				}
+				return opts, fmt.Errorf("unknown harness %q — supported: opencode", arg)
+			}
 			seenPositional = true
 			promptWords = append(promptWords, arg)
 		}
@@ -228,6 +270,9 @@ func parseArgs(argv []string) (options, error) {
 	opts.prompt = strings.TrimSpace(strings.Join(promptWords, " "))
 	if opts.command == "agents-create" && opts.prompt != "" {
 		return opts, fmt.Errorf("`tlc agents create` takes flags, not a prompt — unexpected %q", opts.prompt)
+	}
+	if (opts.command == "install" || opts.command == "uninstall") && opts.prompt != "" {
+		return opts, fmt.Errorf("`tlc %s` takes flags and an optional harness name, not a prompt — unexpected %q", opts.command, opts.prompt)
 	}
 	return opts, nil
 }
