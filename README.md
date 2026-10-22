@@ -8,7 +8,7 @@ prompts.
 
 ```
 $ tlc
-tlc v0.1.0 · sigma (gemini:gemini-3.8-flash) · ~/code/my-app
+tlc v0.2.0 · sigma (gemini:gemini-3.8-flash) · ~/code/my-app
 type /help for commands · /exit to quit
 > why is the login test flaky?
 
@@ -59,7 +59,7 @@ Windows builds and manual downloads live on the
 [releases page](https://github.com/turnlith-AI/turnlith-CLI/releases); on
 Windows the Bash tool uses `cmd.exe` unless Git Bash is installed.
 
-**With Go 1.24+:**
+**With Go 1.26+:**
 
 ```sh
 go install github.com/turnlith-AI/turnlith-CLI/cmd/tlc@latest
@@ -81,19 +81,52 @@ go run ./cmd/tlc
 
 ## Configure
 
-`tlc` shares its connection file with the `tlith` setup CLI
-(`~/.config/tlith/config.json`), so if you already ran `tlith configure` you
-are done. Otherwise:
-
 ```sh
 tlc configure --base-url http://turnlith.com --api-key sk-…
 ```
 
 `tlc configure` verifies the server's health endpoint and your key before
-saving. Chatting needs an **agent-role** key; creating agents or switching a
-model/effort needs an **admin-role** key (both are minted in the turnlith web
-console, under API keys). Environment overrides `TLITH_BASE_URL` /
-`TLITH_API_KEY` win over the file, for CI or throwaway runs.
+saving. The connection lives in `~/.config/tlith/config.json` (mode 600) —
+the same path the retired `tlith` setup helper used, so existing setups keep
+working; one file now serves everything. Chatting needs an **agent-role**
+key; creating agents or switching a model/effort needs an **admin-role** key
+(both are minted in the turnlith web console, under API keys). Environment
+overrides `TLITH_BASE_URL` / `TLITH_API_KEY` win over the file, for CI or
+throwaway runs.
+
+The installer script accepts the same values through the environment, for
+one-paste setup (the key never touches a URL):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/turnlith-AI/turnlith-CLI/main/install.sh \
+  | TLITH_API_KEY=sk-… TLITH_BASE_URL=https://turnlith.com sh
+```
+
+## Use it inside opencode
+
+`tlc` also wires your turnlith agents into other harnesses. For
+[opencode](https://opencode.ai):
+
+```sh
+tlc install opencode
+```
+
+This writes a `turnlith` provider into `~/.config/opencode/opencode.json`
+(or the project's `./opencode.json` with `--project`, preferring an existing
+`opencode.jsonc`) exposing every agent as a model under its codename, plus
+the `turnlith-controller` MCP server for interactive memory search. The edit
+is JSONC-aware: comments and other providers stay untouched, and
+`tlc uninstall opencode` removes exactly the turnlith blocks.
+
+| Flag             | Meaning                                              |
+| ---------------- | ---------------------------------------------------- |
+| `--project`      | target `./opencode.json` in the current directory    |
+| `--provider-id`  | provider key in the config (default `tlith`)         |
+| `--no-mcp`       | skip the turnlith-controller MCP server block        |
+| `--use-env`      | write `{env:TLITH_API_KEY}` instead of embedding the key |
+
+With `--use-env`, export the key in your shell
+(`export TLITH_API_KEY=sk-…`) and it stays out of the config file.
 
 ## Usage
 
@@ -105,6 +138,7 @@ tlc -c                       # continue the previous conversation here
 tlc --agent sigma            # pick the agent (model) explicitly
 tlc agents                   # list the workspace's agents
 tlc agents create            # create an agent (ask-first wizard on a terminal)
+tlc install opencode         # wire the agents into opencode (see below)
 ```
 
 `--agent` matters: memory, transcripts, and billing are per agent. The
@@ -167,9 +201,10 @@ internal/agent/     tool loop + system prompt
 internal/tools/     Read, Write, Edit, Bash, Glob, Grep, SearchMemory
 internal/permissions/  gated-tool approval policy
 internal/ui/        theme, streaming markdown renderer, readline REPL
-internal/cli/       argument handling, REPL, print mode
+internal/cli/       argument handling, REPL, print mode, install/uninstall
+internal/harness/   opencode wiring (JSONC-aware config merge)
 internal/history/   local JSONL transcripts
-internal/config/    shared connection file + tlc preferences
+internal/config/    connection file + tlc preferences
 ```
 
 ## License

@@ -1,7 +1,8 @@
 // Package config resolves the connection tlc uses to reach a turnlith
-// server. The connection (baseUrl + apiKey) is the same file `tlith
-// configure` writes, so one setup serves both CLIs; tlc-specific preferences
-// live next to it in tlc.json.
+// server. The connection (baseUrl + apiKey) lives at
+// ~/.config/tlith/config.json — the path the retired tlith setup helper
+// used, kept so existing setups keep working; tlc-specific preferences live
+// next to it in tlc.json.
 package config
 
 import (
@@ -35,13 +36,12 @@ type ErrNotConfigured struct{ Path string }
 func (e *ErrNotConfigured) Error() string {
 	return fmt.Sprintf(
 		"not connected to a turnlith server yet — run `tlc configure --base-url <url> --api-key sk-…`\n"+
-			"(or `tlith configure …`); expected connection at %s", e.Path)
+			"expected connection at %s", e.Path)
 }
 
-// configDir mirrors the tlith setup CLI's resolution exactly (see
-// packages/cli/src/config.ts): $XDG_CONFIG_HOME when it is an absolute path,
-// otherwise ~/.config — on every platform, macOS included, so both CLIs read
-// the same connection file.
+// configDir resolves $XDG_CONFIG_HOME when it is an absolute path, otherwise
+// ~/.config — on every platform, macOS included — matching what the retired
+// tlith helper did, so pre-tlc setups read the same connection file.
 func configDir() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(xdg) {
 		return filepath.Join(xdg, "tlith")

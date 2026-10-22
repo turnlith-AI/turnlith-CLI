@@ -14,9 +14,9 @@ import (
 	"github.com/turnlith-AI/turnlith-CLI/internal/ui"
 )
 
-// codenameRE mirrors the server's codenameField (src/modules/agents/routes.ts):
-// 3-63 chars, lowercase letters/digits/hyphens, letter-first, colon-free so a
-// codename can never parse as a provider-qualified model id.
+// codenameRE mirrors the server's codename rules: 3-63 chars, lowercase
+// letters/digits/hyphens, letter-first, colon-free so a codename can never
+// parse as a provider-qualified model id.
 var codenameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,61}[a-z0-9]$`)
 
 // errCancelled reports a picker or prompt dismissed with an empty answer.

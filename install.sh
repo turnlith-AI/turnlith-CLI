@@ -6,6 +6,10 @@
 # Environment:
 #   TLC_VERSION      install a specific tag (default: the latest release)
 #   TLC_INSTALL_DIR  destination directory (default: ~/.local/bin)
+#   TLITH_API_KEY    when set, configure the connection after installing
+#                    (passed via the environment, never the download URL)
+#   TLITH_BASE_URL   server URL for that configuration (default:
+#                    https://turnlith.com)
 set -eu
 
 REPO="turnlith-AI/turnlith-CLI"
@@ -80,4 +84,25 @@ case ":$PATH:" in
     esac
     ;;
 esac
-say "next: tlc configure --base-url <server> --api-key sk-…"
+
+# One-paste setup: the caller holds the api key in the environment only —
+# it never appears in a URL or this script's output.
+if [ -n "${TLITH_API_KEY:-}" ]; then
+  base="${TLITH_BASE_URL:-https://turnlith.com}"
+  say ""
+  say "configuring tlc for $base"
+  if ! "$INSTALL_DIR/$BIN" configure --base-url "$base" --api-key "$TLITH_API_KEY"; then
+    die "configure failed — run \`tlc configure --base-url $base --api-key <key>\` yourself"
+  fi
+  if command -v opencode >/dev/null 2>&1; then
+    "$INSTALL_DIR/$BIN" install opencode ||
+      die "opencode wiring failed — run \`tlc install opencode\` yourself"
+  fi
+  say "next: run \`tlc\`, or open opencode and pick an agent under \"turnlith\" in /models"
+else
+  say "next: tlc configure --base-url <server> --api-key sk-…"
+fi
+
+if command -v tlith >/dev/null 2>&1; then
+  say "note: the old tlith helper CLI is now part of tlc — remove it with \`npm rm -g tlith\`"
+fi
