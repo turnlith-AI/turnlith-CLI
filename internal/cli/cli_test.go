@@ -992,4 +992,59 @@ func TestCompleteArgumentOffersWorkspaceWords(t *testing.T) {
 	if len(got) != 1 || got[0] != "minimal" {
 		t.Fatalf("effort completion = %v", got)
 	}
+	got = a.completeArgument("/permissions", "")
+	if len(got) != 3 || got[0] != "normal" || got[1] != "auto" || got[2] != "yolo" {
+		t.Fatalf("permission mode completion = %v", got)
+	}
+	got = a.completeArgument("/permissions", "y")
+	if len(got) != 1 || got[0] != "yolo" {
+		t.Fatalf("permission mode completion (y) = %v", got)
+	}
+}
+
+func TestPermissionsCommandSetsCyclesAndCovers(t *testing.T) {
+	a, out := testApp(t, "http://127.0.0.1:1", testAgents())
+
+	// no argument cycles normal → auto → yolo → normal
+	a.handleSlash("/permissions")
+	if a.policy.Mode != permissions.ModeAuto {
+		t.Fatalf("mode = %v, want auto", a.policy.Mode)
+	}
+	a.handleSlash("/permissions")
+	if a.policy.Mode != permissions.ModeYolo {
+		t.Fatalf("mode = %v, want yolo", a.policy.Mode)
+	}
+	a.handleSlash("/permissions")
+	if a.policy.Mode != permissions.ModeAsk {
+		t.Fatalf("mode = %v, want normal", a.policy.Mode)
+	}
+
+	// explicit words and prefixes
+	a.handleSlash("/permissions auto")
+	if a.policy.Mode != permissions.ModeAuto {
+		t.Fatalf("mode = %v, want auto", a.policy.Mode)
+	}
+	a.handleSlash("/permissions yolo")
+	if a.policy.Mode != permissions.ModeYolo {
+		t.Fatalf("mode = %v, want yolo", a.policy.Mode)
+	}
+	a.handleSlash("/permissions norm")
+	if a.policy.Mode != permissions.ModeAsk {
+		t.Fatalf("mode = %v, want normal", a.policy.Mode)
+	}
+	a.handleSlash("/permissions sideways")
+	if a.policy.Mode != permissions.ModeAsk {
+		t.Fatalf("an unknown mode must not change the policy")
+	}
+	mustContain(t, "unknown mode error", out.String(), "unknown permission mode")
+
+	// /yolo toggles between normal and yolo
+	a.handleSlash("/yolo")
+	if a.policy.Mode != permissions.ModeYolo {
+		t.Fatalf("mode = %v, want yolo", a.policy.Mode)
+	}
+	a.handleSlash("/yolo")
+	if a.policy.Mode != permissions.ModeAsk {
+		t.Fatalf("mode = %v, want normal", a.policy.Mode)
+	}
 }

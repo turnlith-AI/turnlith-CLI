@@ -24,41 +24,47 @@ var Commands = []Command{
 	{Name: "/model", Args: "[spec] [effort]", Help: "switch the agent's model and reasoning effort"},
 	{Name: "/effort", Args: "[level]", Help: "set reasoning effort (low · medium · high · …)"},
 	{Name: "/status", Help: "show agent, server, and session details"},
+	{Name: "/files", Help: "browse the workspace and @-mention a file into the prompt"},
+	{Name: "/permissions", Args: "[normal|auto|yolo]", Help: "set the permission mode; no argument cycles (Tab at an empty prompt cycles too)"},
 	{Name: "/verbose", Help: "toggle token usage display"},
-	{Name: "/yolo", Help: "toggle permission prompts off/on"},
+	{Name: "/yolo", Help: "toggle yolo mode (alias for /permissions yolo)"},
 	{Name: "/exit", Help: "quit"},
 }
 
-// HelpText renders the /help body from the command table.
-func HelpText() string {
+// commandTable renders the aligned two-column command menu: the invocation
+// (accent name, dim arguments) and its description.
+func commandTable(t *Theme) string {
+	width := 0
+	for _, c := range Commands {
+		if n := len(c.Name) + len(c.Args) + 1; n > width {
+			width = n
+		}
+	}
 	var b strings.Builder
 	for _, c := range Commands {
-		line := c.Name
+		line := t.Accent(c.Name)
 		if c.Args != "" {
-			line += " " + c.Args
+			line += " " + t.Dim(c.Args)
 		}
-		b.WriteString(line)
-		if pad := 22 - len(line); pad > 0 {
-			b.WriteString(strings.Repeat(" ", pad))
-		} else {
-			b.WriteString(" ")
+		if pad := width + 2 - len(c.Name) - len(c.Args) - 1; pad > 0 {
+			line += strings.Repeat(" ", pad)
 		}
-		b.WriteString(c.Help)
-		b.WriteString("\n")
+		b.WriteString("  " + line + t.Dim(c.Help) + "\n")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return b.String()
+}
+
+// HelpText renders the /help body from the command table.
+func HelpText(t *Theme) string {
+	return strings.TrimRight(commandTable(t), "\n")
 }
 
 // SuggestText is printed once when "/" opens a fresh command line: the whole
-// menu, so the commands are discoverable before anything is typed. TAB then
-// opens readline's own completion menu, filtered as the line narrows.
+// command menu, so the commands are discoverable before anything is typed.
+// TAB then opens readline's own completion menu, filtered as the line narrows.
 func SuggestText(t *Theme) string {
-	names := make([]string, len(Commands))
-	for i, c := range Commands {
-		names[i] = t.Accent(c.Name)
-	}
-	return "  " + strings.Join(names, " ") + "\n" +
-		"  " + t.Faint("TAB completes · /help describes each command") + "\n"
+	return commandTable(t) +
+		"  " + t.Faint("TAB completes commands, arguments, and @file mentions") + "\n"
 }
 
 // currentToken splits the line being edited into everything before the token
@@ -71,28 +77,32 @@ func currentToken(line string) (before, token string) {
 }
 
 // CompletionWords returns the full words the token under the cursor could
-// expand to. Command names complete at the start of the line; arguments are
-// delegated to extra (agents, models, effort levels) which receives the
-// already-typed command part and the current token. Pure, so it is unit
-// tested without a terminal.
+// expand to. Command names complete at the start of a slash line, arguments
+// after it; a token starting with "@" completes to @file mentions. Both are
+// delegated to extra, which receives the already-typed command part (or the
+// text before the mention) and the current token. Pure, so it is unit tested
+// without a terminal.
 func CompletionWords(line string, extra func(before, prefix string) []string) []string {
-	if !strings.HasPrefix(line, "/") {
-		return nil
-	}
 	before, prefix := currentToken(line)
-	if before == "" {
-		words := make([]string, 0, len(Commands))
-		for _, c := range Commands {
-			if strings.HasPrefix(c.Name, prefix) {
-				words = append(words, c.Name)
+	if strings.HasPrefix(line, "/") {
+		if before == "" {
+			words := make([]string, 0, len(Commands))
+			for _, c := range Commands {
+				if strings.HasPrefix(c.Name, prefix) {
+					words = append(words, c.Name)
+				}
 			}
+			return words
 		}
-		return words
+		if extra == nil {
+			return nil
+		}
+		return extra(before, prefix)
 	}
-	if extra == nil {
-		return nil
+	if strings.HasPrefix(prefix, "@") && extra != nil {
+		return extra(before, prefix)
 	}
-	return extra(before, prefix)
+	return nil
 }
 
 // completer adapts CompletionWords to readline's AutoCompleter contract: Do

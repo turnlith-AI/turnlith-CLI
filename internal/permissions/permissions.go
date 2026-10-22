@@ -1,12 +1,13 @@
 // Package permissions decides which gated tool calls may run. Safe tools
-// never ask; gated tools (Bash, Write, Edit) ask once, and the user can
-// allow or deny a tool for the rest of the session.
+// never ask; gated tools (Bash, Write, Edit) consult the session's permission
+// mode, and the user can allow or deny a tool for the rest of the session.
 package permissions
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Decision is the user's answer to a permission prompt.
@@ -19,11 +20,20 @@ const (
 	DenyAlways
 )
 
+// Tool categories, reported by each tool and consulted by the mode rules.
+const (
+	CategoryEdit   = "edit"   // Write, Edit: modify files in place
+	CategoryExec   = "exec"   // Bash: runs arbitrary commands
+	CategoryRead   = "read"   // Read, Glob, Grep
+	CategoryMemory = "memory" // SearchMemory
+)
+
 // Request describes a gated tool call awaiting approval.
 type Request struct {
-	Tool    string
-	Summary string // one-line description of what will happen
-	Preview string // optional multi-line detail (e.g. a diff)
+	Tool     string
+	Category string // one of the Category* constants
+	Summary  string // one-line description of what will happen
+	Preview  string // optional multi-line detail (e.g. a diff)
 }
 
 // Prompter asks the user; implementations live in the UI layer.
@@ -34,11 +44,83 @@ type Prompter interface {
 // ErrAborted signals the prompt was interrupted (Ctrl-C).
 var ErrAborted = errors.New("permission prompt aborted")
 
+// Mode is the session's permission posture.
+type Mode int
+
+const (
+	// ModeAsk prompts for every gated tool call.
+	ModeAsk Mode = iota
+	// ModeAuto runs file edits (Write, Edit) without asking; Bash still asks.
+	ModeAuto
+	// ModeYolo runs every gated tool without asking.
+	ModeYolo
+)
+
+// modes lists the words /permissions accepts, in cycle order.
+var modes = []Mode{ModeAsk, ModeAuto, ModeYolo}
+
+func (m Mode) String() string {
+	switch m {
+	case ModeAuto:
+		return "auto"
+	case ModeYolo:
+		return "yolo"
+	default:
+		return "normal"
+	}
+}
+
+// NextMode returns the mode after m in cycle order: normal → auto → yolo → normal.
+func NextMode(m Mode) Mode {
+	return modes[(int(m)+1)%len(modes)]
+}
+
+// Description explains what a mode does, for /status and the banner.
+func (m Mode) Description() string {
+	switch m {
+	case ModeAuto:
+		return "auto — Write/Edit run without asking, Bash still asks"
+	case ModeYolo:
+		return "yolo — no prompts, every tool runs"
+	default:
+		return "normal — ask before Bash/Write/Edit"
+	}
+}
+
+// ParseMode reads a mode word: the full names ("normal", "auto", "yolo"),
+// "ask" as an alias for normal, or a unique prefix of any of them.
+func ParseMode(s string) (Mode, bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ModeAsk, false
+	}
+	var match Mode
+	found := false
+	for _, m := range modes {
+		for _, name := range []string{m.String(), "ask"} {
+			if name == "ask" && m != ModeAsk {
+				continue
+			}
+			if name == s {
+				return m, true
+			}
+			if strings.HasPrefix(name, s) {
+				if found {
+					return ModeAsk, false // ambiguous prefix
+				}
+				match, found = m, true
+			}
+		}
+	}
+	return match, found
+}
+
 // Policy is the session permission state.
 type Policy struct {
-	// Yolo allows every gated tool without asking.
-	Yolo bool
-	// Prompter is consulted for gated tools not covered by an Always/Never rule.
+	// Mode decides the baseline: which gated tools may run without asking.
+	Mode Mode
+	// Prompter is consulted for gated tools not covered by the mode or an
+	// Always/Never rule.
 	Prompter Prompter
 
 	allowAll map[string]bool
@@ -48,7 +130,7 @@ type Policy struct {
 // Approve returns whether the tool may run. It records durable per-session
 // answers and never asks twice for the same tool.
 func (p *Policy) Approve(ctx context.Context, req Request) (bool, error) {
-	if p.Yolo {
+	if p.Mode == ModeYolo {
 		return true, nil
 	}
 	if p.allowAll != nil && p.allowAll[req.Tool] {
@@ -56,6 +138,9 @@ func (p *Policy) Approve(ctx context.Context, req Request) (bool, error) {
 	}
 	if p.denyAll != nil && p.denyAll[req.Tool] {
 		return false, nil
+	}
+	if p.Mode == ModeAuto && req.Category == CategoryEdit {
+		return true, nil
 	}
 	if p.Prompter == nil {
 		return false, nil

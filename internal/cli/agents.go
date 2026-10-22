@@ -89,8 +89,17 @@ func matching(words []string, prefix string) []string {
 	return out
 }
 
-// completeArgument supplies TAB completions for a slash command's arguments.
+// completeArgument supplies TAB completions for a slash command's arguments
+// and for @file mentions in plain prompts.
 func (a *app) completeArgument(before, prefix string) []string {
+	if strings.HasPrefix(prefix, "@") {
+		words := pathCandidates(a.cwd, strings.TrimPrefix(prefix, "@"))
+		out := make([]string, len(words))
+		for i, w := range words {
+			out[i] = "@" + w
+		}
+		return out
+	}
 	fields := strings.Fields(before)
 	if len(fields) == 0 {
 		return nil
@@ -117,6 +126,8 @@ func (a *app) completeArgument(before, prefix string) []string {
 		return matching(effortsFor(models, fields[1]), prefix)
 	case "/effort":
 		return matching(effortsFor(a.workspaceModels(false), a.agent.Model), prefix)
+	case "/permissions":
+		return matching([]string{"normal", "auto", "yolo"}, prefix)
 	}
 	return nil
 }

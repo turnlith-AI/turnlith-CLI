@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
+
+	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
 
 // GlobTool finds files by pattern.
@@ -34,6 +36,8 @@ func (t *GlobTool) Schema() json.RawMessage {
 }
 
 func (t *GlobTool) Gated() bool { return false }
+
+func (t *GlobTool) Category() string { return permissions.CategoryRead }
 
 type globArgs struct {
 	Pattern string `json:"pattern"`

@@ -170,20 +170,26 @@ func humanTokens(n int) string {
 	}
 }
 
-// PermissionBlock renders a gated tool call's summary, preview, and options
-// before the REPL reads the answer.
-func (r *Renderer) PermissionBlock(name string, preview string) {
+// PermissionBlock renders a gated tool call — a header naming the tool and
+// what it will do, the diff-colored preview, and the answer options — before
+// the REPL reads the one-key answer.
+func (r *Renderer) PermissionBlock(name, summary, preview string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.lastByte != 0 && r.lastByte != '\n' {
 		r.writeLocked("\n")
 	}
+	header := "  " + r.Theme.Accent(GlyphTool) + " " + r.Theme.Bold(name)
+	if summary != "" {
+		header += r.Theme.Dim("(" + sanitizeInline(summary) + ")")
+	}
+	r.writeLocked(header + "\n")
 	if preview != "" {
 		for _, line := range strings.Split(sanitizeBlock(preview), "\n") {
-			r.writeLocked("  " + stylePreviewLine(r, line) + "\n")
+			r.writeLocked("    " + stylePreviewLine(r, line) + "\n")
 		}
 	}
-	r.writeLocked("  " + r.Theme.Dim("allow? [enter] yes · [a] always · [n] no · [x] never this session") + "\n")
+	r.writeLocked("  " + r.Theme.Dim("[y] allow · [a] always · [n] deny · [x] never") + "\n")
 	r.lastByte = '\n'
 }
 

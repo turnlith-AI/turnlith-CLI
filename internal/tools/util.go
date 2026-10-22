@@ -51,8 +51,8 @@ func truncateText(s string, max int) string {
 	return s[:cut] + fmt.Sprintf("\n… (truncated, %d more characters)", len(s)-cut)
 }
 
-// isBinary reports whether data looks like a binary file.
-func isBinary(data []byte) bool {
+// IsBinary reports whether data looks like a binary file.
+func IsBinary(data []byte) bool {
 	probe := data
 	if len(probe) > 8192 {
 		probe = probe[:8192]
@@ -72,6 +72,10 @@ var skipDirs = map[string]bool{
 }
 
 func shouldSkipDir(name string) bool { return skipDirs[name] }
+
+// IsSkipDir reports whether a directory should never be walked into (or
+// listed): heavyweight caches and dependency trees.
+func IsSkipDir(name string) bool { return skipDirs[name] }
 
 // limitedBuffer captures process output up to a cap, discarding the rest
 // while still reporting success so the child process keeps running.

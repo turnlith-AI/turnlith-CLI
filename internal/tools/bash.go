@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
 
 // BashTool runs shell commands in the project root.
@@ -34,6 +36,8 @@ func (t *BashTool) Schema() json.RawMessage {
 }
 
 func (t *BashTool) Gated() bool { return true }
+
+func (t *BashTool) Category() string { return permissions.CategoryExec }
 
 type bashArgs struct {
 	Command   string `json:"command"`

@@ -202,3 +202,38 @@ func TestLimitedBufferCaps(t *testing.T) {
 		t.Fatalf("buffer = %q", out)
 	}
 }
+
+func TestTrackerRecordsActivity(t *testing.T) {
+	tr := NewTracker()
+	a, b, c := "/proj/a.go", "/proj/b.go", "/proj/c.go"
+	tr.MarkRead(a)
+	time.Sleep(time.Millisecond)
+	tr.MarkWritten(b)
+	time.Sleep(time.Millisecond)
+	tr.MarkEdited(c)
+
+	files := tr.Files()
+	if len(files) != 3 {
+		t.Fatalf("files = %+v", files)
+	}
+	// most recently touched first
+	if files[0].Path != c || files[1].Path != b || files[2].Path != a {
+		t.Fatalf("order = %+v", files)
+	}
+	if !files[0].Edited || files[0].Written || files[0].Read {
+		t.Fatalf("c activity = %+v", files[0])
+	}
+	if !files[1].Written || files[1].Edited {
+		t.Fatalf("b activity = %+v", files[1])
+	}
+	if !files[2].Read || files[2].Written {
+		t.Fatalf("a activity = %+v", files[2])
+	}
+	// writing and editing imply read, so the model can keep editing
+	if !tr.WasRead(b) || !tr.WasRead(c) {
+		t.Fatal("written/edited files must count as read")
+	}
+	if tr.WasRead("/proj/missing.go") {
+		t.Fatal("unknown file reported as read")
+	}
+}

@@ -28,12 +28,35 @@ type REPL struct {
 	out      io.Writer
 
 	// candidates supplies argument completions for slash commands (agent
-	// codenames, model ids, effort levels); nil completes command names only.
+	// codenames, model ids, effort levels, @file mentions); nil completes
+	// command names only.
 	candidates func(before, prefix string) []string
+	// onTabEmpty runs when Tab is pressed on an empty line (readline has no
+	// candidates then, so Tab is free); the app cycles the permission mode.
+	onTabEmpty func()
 }
 
 // SetCandidates wires the argument completions the ui package cannot know.
 func (r *REPL) SetCandidates(fn func(before, prefix string) []string) { r.candidates = fn }
+
+// SetOnTabEmpty installs the empty-line Tab action.
+func (r *REPL) SetOnTabEmpty(fn func()) { r.onTabEmpty = fn }
+
+// SetPermissionMode restyles the input prompt to reflect the mode.
+func (r *REPL) SetPermissionMode(mode permissions.Mode) {
+	r.rl.SetPrompt(PromptForMode(r.theme, mode))
+}
+
+// WriteAbove prints text above the input line; it goes through readline's
+// prompt-aware writer so the input line is redrawn cleanly below.
+func (r *REPL) WriteAbove(s string) { _, _ = r.rl.Write([]byte(s)) }
+
+// Refresh redraws the prompt and input line.
+func (r *REPL) Refresh() { r.rl.Refresh() }
+
+// Prefill places text in the input buffer of the next Readline (the file
+// browser uses it to insert an @mention).
+func (r *REPL) Prefill(text string) { r.rl.SetDefault(text) }
 
 func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 	r := &REPL{renderer: renderer, theme: theme, out: renderer.Out}
@@ -41,7 +64,7 @@ func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 	// while reading a line, after NewEx returned, so the late assignment is safe.
 	var instance *readline.Instance
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          "> ",
+		Prompt:          PromptForMode(theme, permissions.ModeAsk),
 		HistoryFile:     filepath.Join(config.StateDir(), "history"),
 		HistoryLimit:    1000,
 		InterruptPrompt: "^C",
@@ -58,6 +81,11 @@ func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 			// input line is redrawn cleanly below the menu.
 			if key == '/' && len(line) == 1 && instance != nil {
 				_, _ = instance.Write([]byte(SuggestText(r.theme)))
+			}
+			// Tab on an empty line has no completion candidates, so it is free
+			// for the app's mode cycler (Claude Code-style shift+tab).
+			if key == '\t' && len(line) == 0 && r.onTabEmpty != nil {
+				r.onTabEmpty()
 			}
 			return nil, 0, false
 		},
@@ -97,10 +125,33 @@ func (r *REPL) ReadSecret(prompt string) (string, error) {
 
 func (r *REPL) Close() { _ = r.rl.Close() }
 
-// Prompt implements permissions.Prompter for gated tool calls.
+// Prompt implements permissions.Prompter for gated tool calls. One keypress
+// answers — no Enter: y allow · a always · n deny · x never; Enter allows,
+// Ctrl-C aborts. Platforms without a raw-mode stdin fall back to typing.
 func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
-	r.renderer.PermissionBlock(req.Tool, req.Preview)
+	r.renderer.PermissionBlock(req.Tool, req.Summary, req.Preview)
 	for {
+		if key, ok := readSingleKey(); ok {
+			switch key {
+			case "y", "enter":
+				r.echoAnswer("y allow")
+				return permissions.AllowOnce, nil
+			case "a":
+				r.echoAnswer("a always this session")
+				return permissions.AllowAlways, nil
+			case "n", "esc":
+				r.echoAnswer("n deny")
+				return permissions.Deny, nil
+			case "x":
+				r.echoAnswer("x never this session")
+				return permissions.DenyAlways, nil
+			case "ctrlC":
+				r.echoAnswer("^C")
+				return permissions.Deny, permissions.ErrAborted
+			}
+			continue
+		}
+		// fallback: a typed line
 		answer, err := r.Readline()
 		if err != nil {
 			if errors.Is(err, readline.ErrInterrupt) {
@@ -121,6 +172,12 @@ func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
 			r.renderer.Infof("%s", r.theme.Dim("please answer y, a, n, or x"))
 		}
 	}
+}
+
+// echoAnswer shows the chosen answer under the permission block (raw mode
+// has no echo of its own).
+func (r *REPL) echoAnswer(answer string) {
+	fmt.Fprintln(r.out, "  "+r.theme.Accent(answer))
 }
 
 // Pick shows a numbered list and returns the chosen index. An empty answer

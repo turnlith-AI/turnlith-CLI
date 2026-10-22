@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +32,7 @@ Usage:
   tlc -p "explain main.go"   one-shot: print the answer and exit
   tlc -c                     continue the previous conversation here
   tlc --agent <codename>     pick the turnlith agent (model) to talk to
-  tlc --yolo                 skip permission prompts for gated tools
+  tlc --yolo                 run every gated tool without asking
 
 Commands:
   tlc agents                 list the workspace's agents
@@ -45,7 +46,7 @@ Options:
   -p, --print     non-interactive; assistant text to stdout, tool activity to stderr
   -c, --continue  replay the previous local transcript for this directory
       --agent     agent codename (defaults to the saved/last-used choice)
-      --yolo      allow Bash/Write/Edit without asking
+      --yolo      start in yolo permission mode (no prompts for gated tools)
       --verbose   show token usage after each turn
       --base-url  override the server URL for this run
       --api-key   override the api key for this run
@@ -64,7 +65,8 @@ Options for ` + "`tlc install opencode`" + `:
 
 Environment: TLITH_BASE_URL, TLITH_API_KEY (connection), TLC_AGENT (default agent)
 
-In the REPL: /help /clear /agent /agents /model /effort /status /verbose /yolo /exit
+In the REPL: /help /clear /files /agent /agents /model /effort /status /permissions /verbose /yolo /exit
+@file mentions attach files to a prompt (TAB completes paths); Tab at an empty prompt cycles the permission mode
 `
 
 type options struct {
@@ -287,6 +289,7 @@ type app struct {
 	runner   *agent.Runner
 	policy   *permissions.Policy
 	registry *tools.Registry
+	tracker  *tools.Tracker
 
 	theme       *ui.Theme
 	renderer    *ui.Renderer
@@ -345,6 +348,7 @@ func newApp(opts options) (*app, error) {
 	a.agents = agents
 
 	tracker := tools.NewTracker()
+	a.tracker = tracker
 	a.registry = tools.NewRegistry(
 		&tools.ReadTool{Root: cwd, Tracker: tracker},
 		&tools.WriteTool{Root: cwd, Tracker: tracker},
@@ -354,7 +358,11 @@ func newApp(opts options) (*app, error) {
 		&tools.GrepTool{Root: cwd},
 		&tools.SearchMemoryTool{Client: a.client, Agent: func() string { return a.agent.Codename }},
 	)
-	a.policy = &permissions.Policy{Yolo: opts.yolo}
+	mode := permissions.ModeAsk
+	if opts.yolo {
+		mode = permissions.ModeYolo
+	}
+	a.policy = &permissions.Policy{Mode: mode}
 	a.runner = &agent.Runner{
 		Client: a.client,
 		Tools:  a.registry,
@@ -465,6 +473,14 @@ func (a *app) runInteractive() int {
 	}
 	a.repl = repl
 	repl.SetCandidates(a.completeArgument)
+	repl.SetPermissionMode(a.policy.Mode)
+	repl.SetOnTabEmpty(func() {
+		mode := permissions.NextMode(a.policy.Mode)
+		a.policy.Mode = mode
+		repl.SetPermissionMode(mode)
+		repl.WriteAbove(permissionModeLine(a.theme, mode) + "\n")
+		repl.Refresh()
+	})
 	a.policy.Prompter = repl
 
 	if err := a.chooseAgent(true); err != nil {
@@ -478,11 +494,20 @@ func (a *app) runInteractive() int {
 		a.runWithCancel(a.opts.prompt)
 	}
 
+	interrupts := 0
 	for {
 		line, err := a.repl.Readline()
 		if errors.Is(err, ui.ErrInterrupt) {
+			// one Ctrl-C clears the line; a second in a row quits
+			if interrupts > 0 {
+				a.renderer.Infof("%s", a.theme.Dim("bye"))
+				return 0
+			}
+			interrupts++
+			a.renderer.Notice("press Ctrl-C again to quit")
 			continue
 		}
+		interrupts = 0
 		if err == io.EOF {
 			a.renderer.Infof("%s", a.theme.Dim("bye"))
 			return 0
@@ -505,6 +530,30 @@ func (a *app) runInteractive() int {
 	}
 }
 
+// openFileBrowser runs the /files browser and pre-fills the next prompt with
+// the picked file as an @mention.
+func (a *app) openFileBrowser() {
+	var touched []ui.FileBadge
+	for _, f := range a.tracker.Files() {
+		rel, err := filepath.Rel(a.cwd, f.Path)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			continue // touched outside the workspace (e.g. ~ paths)
+		}
+		touched = append(touched, ui.FileBadge{
+			Path: filepath.ToSlash(rel), Read: f.Read, Written: f.Written, Edited: f.Edited,
+		})
+	}
+	picked, err := ui.RunFileBrowser(a.cwd, touched, a.theme, os.Stdout)
+	if err != nil {
+		a.renderer.Errorf("file browser: %v", err)
+		return
+	}
+	if picked != "" && a.repl != nil {
+		a.repl.Prefill("@" + picked + " ")
+	}
+}
+
+// printBanner prints the session header.
 func (a *app) printBanner() {
 	a.renderer.Infof("%s %s · %s · %s",
 		a.theme.BoldAccent("tlc"),
@@ -512,7 +561,32 @@ func (a *app) printBanner() {
 		a.theme.Accent(a.agent.Codename)+a.theme.Dim(" ("+modelNote(a.agent)+")"),
 		a.theme.Dim(shortPath(a.cwd)),
 	)
-	a.renderer.Infof("%s", a.theme.Faint("type /help for commands · /exit to quit"+(map[bool]string{true: " · permissions off (--yolo)", false: ""}[a.policy.Yolo])))
+	modeHint := ""
+	if a.policy.Mode != permissions.ModeAsk {
+		modeHint = " · permissions: " + a.policy.Mode.String()
+	}
+	a.renderer.Infof("%s", a.theme.Faint("type /help for commands · Tab cycles the permission mode · /exit to quit"+modeHint))
+}
+
+// permissionModeLine is the status line shown when the mode changes.
+func permissionModeLine(t *ui.Theme, mode permissions.Mode) string {
+	switch mode {
+	case permissions.ModeAuto:
+		return t.Yellow("⏵ auto — file edits run without asking, Bash still asks")
+	case permissions.ModeYolo:
+		return t.Red("⏵⏵ yolo — every tool runs without asking")
+	default:
+		return t.Green("normal — Bash, Write and Edit ask before running")
+	}
+}
+
+// setPermissionMode switches the mode, restyles the prompt, and reports it.
+func (a *app) setPermissionMode(mode permissions.Mode) {
+	a.policy.Mode = mode
+	if a.repl != nil {
+		a.repl.SetPermissionMode(mode)
+	}
+	a.renderer.Infof("%s", permissionModeLine(a.theme, mode))
 }
 
 func (a *app) openTranscript(cont bool) {
@@ -568,8 +642,10 @@ func indentBlock(text, indent string) string {
 	return strings.Join(lines, "\n")
 }
 
-// runWithCancel runs one prompt with Ctrl-C cancelling the run.
+// runWithCancel runs one prompt with Ctrl-C cancelling the run. The raw text
+// is kept for the transcript; @file mentions are expanded on the wire.
 func (a *app) runWithCancel(prompt string) {
+	wire := a.attachMentions(prompt, a.renderer)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sigCh := make(chan os.Signal, 1)
@@ -587,11 +663,11 @@ func (a *app) runWithCancel(prompt string) {
 		signal.Stop(sigCh)
 		close(done)
 	}()
-	a.runPrompt(ctx, prompt, a.renderer, a.renderer)
+	a.runPrompt(ctx, prompt, wire, a.renderer, a.renderer)
 }
 
-func (a *app) runPrompt(ctx context.Context, prompt string, out, activity *ui.Renderer) {
-	a.transcript.Append("user", prompt)
+func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity *ui.Renderer) {
+	a.transcript.Append("user", display)
 
 	var turnText strings.Builder
 	spinner := out.StartSpinner("thinking…")
@@ -632,7 +708,7 @@ func (a *app) runPrompt(ctx context.Context, prompt string, out, activity *ui.Re
 			}
 		},
 	}
-	err := a.runner.Run(ctx, prompt, events)
+	err := a.runner.Run(ctx, wire, events)
 	stopSpinner()
 	out.EndText()
 
@@ -655,7 +731,7 @@ func (a *app) handleSlash(line string) bool {
 	case "/exit", "/quit":
 		return true
 	case "/help":
-		a.renderer.Infof("%s", a.theme.Dim(ui.HelpText()))
+		a.renderer.Infof("%s", ui.HelpText(a.theme))
 	case "/clear":
 		a.runner.Reset()
 		a.renderer.Notice("local task history cleared — the agent's server-side memory is kept")
@@ -708,14 +784,33 @@ func (a *app) handleSlash(line string) bool {
 		a.renderer.Infof("server:     %s", a.client.BaseURL)
 		a.renderer.Infof("api key:    %s", key)
 		a.renderer.Infof("directory:  %s", a.cwd)
-		a.renderer.Infof("permissions: %s", map[bool]string{true: "yolo (no prompts)", false: "ask for Bash/Write/Edit"}[a.policy.Yolo])
+		a.renderer.Infof("permissions: %s", a.policy.Mode.Description())
 		a.renderer.Infof("transcript: %s", a.transcriptPath())
 	case "/verbose":
 		a.verbose = !a.verbose
 		a.renderer.Notice(fmt.Sprintf("verbose %v", map[bool]string{true: "on", false: "off"}[a.verbose]))
+	case "/files":
+		a.openFileBrowser()
+	case "/permissions":
+		switch {
+		case len(fields) > 2:
+			a.renderer.Errorf("usage: /permissions [normal|auto|yolo]")
+		case len(fields) == 1:
+			a.setPermissionMode(permissions.NextMode(a.policy.Mode))
+		default:
+			mode, ok := permissions.ParseMode(fields[1])
+			if !ok {
+				a.renderer.Errorf("unknown permission mode %q — use normal, auto, or yolo", fields[1])
+				return false
+			}
+			a.setPermissionMode(mode)
+		}
 	case "/yolo":
-		a.policy.Yolo = !a.policy.Yolo
-		a.renderer.Notice(map[bool]string{true: "permission prompts off", false: "permission prompts on"}[a.policy.Yolo])
+		if a.policy.Mode == permissions.ModeYolo {
+			a.setPermissionMode(permissions.ModeAsk)
+		} else {
+			a.setPermissionMode(permissions.ModeYolo)
+		}
 	default:
 		a.renderer.Infof("%s", a.theme.Dim("unknown command "+fields[0]+" — try /help"))
 	}
@@ -744,7 +839,7 @@ func (a *app) runPrint() int {
 	}
 	a.renderer.DisableSpinner()
 	a.errRenderer.DisableSpinner()
-	if !a.policy.Yolo {
+	if a.policy.Mode != permissions.ModeYolo {
 		a.policy.Prompter = printPrompter{renderer: a.errRenderer, theme: a.theme}
 	}
 	if session, err := history.Start(a.cwd, a.agent.Codename); err == nil {
@@ -761,7 +856,8 @@ func (a *app) runPrint() int {
 		cancel()
 	}()
 
-	a.runPrompt(ctx, prompt, a.renderer, a.errRenderer)
+	wire := a.attachMentions(prompt, a.errRenderer)
+	a.runPrompt(ctx, prompt, wire, a.renderer, a.errRenderer)
 	return 0
 }
 

@@ -6,7 +6,7 @@ import (
 )
 
 func TestHelpTextCoversEveryCommand(t *testing.T) {
-	help := HelpText()
+	help := HelpText(&Theme{})
 	for _, c := range Commands {
 		if !strings.Contains(help, c.Name) {
 			t.Errorf("help text is missing %s", c.Name)
@@ -21,11 +21,14 @@ func TestSuggestTextListsCommandsAndTab(t *testing.T) {
 	text := SuggestText(&Theme{})
 	for _, c := range Commands {
 		if !strings.Contains(text, c.Name) {
-			t.Errorf("suggestion line is missing %s", c.Name)
+			t.Errorf("suggestion table is missing %s", c.Name)
+		}
+		if !strings.Contains(text, c.Help) {
+			t.Errorf("suggestion table is missing the description of %s", c.Name)
 		}
 	}
 	if !strings.Contains(text, "TAB") {
-		t.Errorf("suggestion line does not mention TAB: %q", text)
+		t.Errorf("suggestion table does not mention TAB: %q", text)
 	}
 }
 
@@ -81,6 +84,28 @@ func TestCompletionWordsIgnoresPlainInput(t *testing.T) {
 		return nil
 	}); got != nil {
 		t.Fatalf("completions for plain input = %v", got)
+	}
+}
+
+func TestCompletionWordsMentions(t *testing.T) {
+	var seenBefore, seenPrefix string
+	extra := func(before, prefix string) []string {
+		seenBefore, seenPrefix = before, prefix
+		return []string{"@internal/cli/"}
+	}
+
+	got := CompletionWords("look at @int", extra)
+	if seenBefore != "look at" || seenPrefix != "@int" {
+		t.Fatalf("extra called with (%q, %q)", seenBefore, seenPrefix)
+	}
+	if len(got) != 1 || got[0] != "@internal/cli/" {
+		t.Fatalf("mention completions = %v", got)
+	}
+
+	// a token without "@" is prose, not a mention
+	seenPrefix = ""
+	if got := CompletionWords("look at int", extra); got != nil || seenPrefix != "" {
+		t.Fatalf("plain tokens must not complete: %v", got)
 	}
 }
 

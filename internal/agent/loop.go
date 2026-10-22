@@ -127,7 +127,12 @@ func (r *Runner) execute(ctx context.Context, call api.ToolCall, ev Events) (str
 		result = fmt.Sprintf("Error: unknown tool %q — available: %s", name, strings.Join(r.Tools.Names(), ", "))
 	case tool.Gated():
 		summary, preview := ui.ToolCallSummary(name, call.Function.Arguments)
-		approved, err := r.Policy.Approve(ctx, permissions.Request{Tool: name, Summary: summary, Preview: preview})
+		approved, err := r.Policy.Approve(ctx, permissions.Request{
+			Tool:     name,
+			Category: tool.Category(),
+			Summary:  summary,
+			Preview:  preview,
+		})
 		if err != nil {
 			return "", err
 		}

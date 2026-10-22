@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
 
 // ReadTool reads a text file with line numbers.
@@ -30,6 +32,8 @@ func (t *ReadTool) Schema() json.RawMessage {
 }
 
 func (t *ReadTool) Gated() bool { return false }
+
+func (t *ReadTool) Category() string { return permissions.CategoryRead }
 
 const (
 	readDefaultLimit = 2000
@@ -62,7 +66,7 @@ func (t *ReadTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("cannot read %s: %w", path, err)
 	}
-	if isBinary(data) {
+	if IsBinary(data) {
 		return "", fmt.Errorf("%s appears to be binary and cannot be read as text", path)
 	}
 	if len(data) == 0 {

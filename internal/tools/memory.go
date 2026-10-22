@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
+	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
 
 // SearchMemoryTool queries the agent's own long-term memory through the
@@ -36,6 +37,8 @@ func (t *SearchMemoryTool) Schema() json.RawMessage {
 }
 
 func (t *SearchMemoryTool) Gated() bool { return false }
+
+func (t *SearchMemoryTool) Category() string { return permissions.CategoryMemory }
 
 type memoryArgs struct {
 	Query string `json:"query"`

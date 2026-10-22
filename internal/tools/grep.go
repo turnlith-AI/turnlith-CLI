@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
+
+	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
 
 // GrepTool searches file contents. It prefers ripgrep when installed (which
@@ -41,6 +43,8 @@ func (t *GrepTool) Schema() json.RawMessage {
 }
 
 func (t *GrepTool) Gated() bool { return false }
+
+func (t *GrepTool) Category() string { return permissions.CategoryRead }
 
 type grepArgs struct {
 	Pattern    string `json:"pattern"`
@@ -174,7 +178,7 @@ func (t *GrepTool) runGo(ctx context.Context, args grepArgs) (string, error) {
 			return nil
 		}
 		data, err := os.ReadFile(path)
-		if err != nil || isBinary(data) {
+		if err != nil || IsBinary(data) {
 			return nil
 		}
 		lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")

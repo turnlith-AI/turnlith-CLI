@@ -9,8 +9,8 @@ prompts.
 ```
 $ tlc
 tlc v0.2.0 · sigma (gemini:gemini-3.8-flash) · ~/code/my-app
-type /help for commands · /exit to quit
-> why is the login test flaky?
+type /help for commands · Tab cycles the permission mode · /exit to quit
+❯ why is the login test flaky?
 
 ⏺ Read(internal/auth/login_test.go)
   ⎿  1→package auth
@@ -40,10 +40,23 @@ seven tools, matching the harness vocabulary:
 | `Write`        | create or overwrite a file                 |     yes     |
 | `Edit`         | replace a string in a file                 |     yes     |
 
-Gated tools ask once per call: `enter` allows this one, `a` allows that tool
-for the rest of the session, `n` denies, `x` never allows it this session.
-`--yolo` skips prompting entirely. Files must be read before they can be
-edited, so the model can't blind-overwrite work it has never seen.
+Gated tools consult the session's **permission mode** — `normal`, `auto`, or
+`yolo`:
+
+| Mode     | Behavior                                                  |
+| -------- | --------------------------------------------------------- |
+| `normal` | every gated call asks first (the default)                  |
+| `auto`   | `Write`/`Edit` run without asking; `Bash` still asks       |
+| `yolo`   | everything runs without asking (`--yolo`, `/permissions yolo`) |
+
+Switch with `/permissions [normal|auto|yolo]` (TAB completes the word), press
+`Tab` on an empty prompt to cycle `normal → auto → yolo → normal`, or use
+`--yolo` up front. The prompt shows where you are: `❯` normal, `⏵❯` auto,
+`⏵⏵❯` yolo. When a call does ask, one keypress answers — `y` allow, `a`
+allow this tool for the session, `n` deny, `x` never this session; Enter
+allows, Ctrl-C aborts. A session rule (always/never) survives mode switches.
+Files must be read before they can be edited, so the model can't
+blind-overwrite work it has never seen.
 
 ## Install
 
@@ -166,13 +179,23 @@ tlc agents create --name bug-hunter --label "Bug hunter" \
 omitted), `--label`, `--model`, and `--effort`
 (`none|minimal|low|medium|high|xhigh`).
 
-In the REPL: `/help`, `/clear`, `/agent [name|new]`, `/agents`, `/model
-[spec] [effort]`, `/effort [level]`, `/status`, `/verbose`, `/yolo`, `/exit`;
-typing `/` prints the command menu and `TAB` completes commands and their
-arguments (agent codenames, model ids, effort levels). `/model` and `/effort`
-persist on the agent server-side, so the change applies to every client of
-that agent. `Ctrl-C` interrupts the run in progress; another `Ctrl-C` at an
-empty prompt quits.
+**Files.** Type `@` in any prompt to mention a file — `@internal/ui/repl.go`
+attaches its contents to your message, so the model sees it (and can edit it)
+without a read round-trip. TAB completes paths while you type: `@cli.g<TAB>`
+finds `internal/cli/cli.go`, directories complete with a trailing `/`.
+`/files` opens an arrow-key browser over the workspace (heavyweight trees
+like `node_modules` are skipped) with the files this session has read,
+written, or edited pinned on top; picking one pre-fills the prompt with its
+`@mention`. Mentions work in one-shot mode too: `tlc -p "explain @main.go"`.
+
+In the REPL: `/help`, `/clear`, `/files`, `/agent [name|new]`, `/agents`,
+`/model [spec] [effort]`, `/effort [level]`, `/status`, `/permissions
+[normal|auto|yolo]`, `/verbose`, `/yolo`, `/exit`; typing `/` prints the
+command menu and `TAB` completes commands, their arguments (agent codenames,
+model ids, effort levels, permission modes), and `@file` mentions. `/model`
+and `/effort` persist on the agent server-side, so the change applies to
+every client of that agent. `Ctrl-C` interrupts the run in progress; another
+`Ctrl-C` at an empty prompt quits.
 
 Local transcripts (display-only — the real memory is on the server) are
 JSONL files under `~/.local/share/tlith/tlc/sessions/`, one per session, so

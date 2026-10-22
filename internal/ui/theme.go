@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
 
 // Theme holds the ANSI styling helpers. When colors are disabled every
@@ -83,8 +85,21 @@ func (t *Theme) BoldAccent(s string) string {
 const (
 	GlyphTool   = "⏺"
 	GlyphResult = "⎿"
-	GlyphPrompt = ">"
+	GlyphPrompt = "❯"
 )
+
+// PromptForMode builds the input prompt for a permission mode: plain accent
+// when every gated tool asks, one chevron in auto mode, two in yolo.
+func PromptForMode(t *Theme, mode permissions.Mode) string {
+	switch mode {
+	case permissions.ModeAuto:
+		return t.Yellow("⏵"+GlyphPrompt) + " "
+	case permissions.ModeYolo:
+		return t.Red("⏵⏵"+GlyphPrompt) + " "
+	default:
+		return t.Accent(GlyphPrompt) + " "
+	}
+}
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 

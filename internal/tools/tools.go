@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
 )
@@ -20,6 +22,9 @@ type Tool interface {
 	Schema() json.RawMessage
 	// Gated reports whether calls need user permission (Claude Code style).
 	Gated() bool
+	// Category classifies the tool for the permission policy: auto mode
+	// approves edits without asking, everything else still consults the mode.
+	Category() string
 	Run(ctx context.Context, args json.RawMessage) (string, error)
 }
 
@@ -69,25 +74,73 @@ func (r *Registry) Run(ctx context.Context, name string, args json.RawMessage) (
 	return t.Run(ctx, args)
 }
 
-// Tracker remembers which files the session has read, so Write/Edit can
-// refuse to modify files the model has never seen.
-type Tracker struct {
-	mu   sync.Mutex
-	read map[string]bool
+// FileActivity records what the session has done to one file.
+type FileActivity struct {
+	Path    string
+	Read    bool
+	Written bool // created or replaced wholesale
+	Edited  bool // modified in place
+	Touched time.Time
 }
 
-func NewTracker() *Tracker { return &Tracker{read: map[string]bool{}} }
+// Tracker remembers which files the session has read, so Write/Edit can
+// refuse to modify files the model has never seen — and which files it has
+// read, written, or edited, for /files and the file browser.
+type Tracker struct {
+	mu    sync.Mutex
+	read  map[string]bool
+	files map[string]*FileActivity
+}
 
-func (t *Tracker) MarkRead(path string) {
+func NewTracker() *Tracker {
+	return &Tracker{read: map[string]bool{}, files: map[string]*FileActivity{}}
+}
+
+func (t *Tracker) mark(path string, mark func(*FileActivity)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.read[path] = true
+	f := t.files[path]
+	if f == nil {
+		f = &FileActivity{Path: path}
+		t.files[path] = f
+	}
+	mark(f)
+	f.Touched = time.Now()
+}
+
+func (t *Tracker) MarkRead(path string) {
+	t.mark(path, func(f *FileActivity) { f.Read = true })
+}
+
+// MarkWritten records a Write; written files count as read for the
+// read-before-edit rule.
+func (t *Tracker) MarkWritten(path string) {
+	t.mark(path, func(f *FileActivity) { f.Written = true })
+}
+
+// MarkEdited records an Edit; edited files count as read for the
+// read-before-edit rule.
+func (t *Tracker) MarkEdited(path string) {
+	t.mark(path, func(f *FileActivity) { f.Edited = true })
 }
 
 func (t *Tracker) WasRead(path string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.read[path]
+}
+
+// Files returns the session's file activity, most recently touched first.
+func (t *Tracker) Files() []FileActivity {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]FileActivity, 0, len(t.files))
+	for _, f := range t.files {
+		out = append(out, *f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Touched.After(out[j].Touched) })
+	return out
 }
 
 // decodeArgs unmarshals tool arguments; empty arguments decode to zero values.

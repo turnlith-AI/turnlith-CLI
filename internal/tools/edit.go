@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
 
 // EditTool performs exact-string replacements in a file.
@@ -32,6 +34,8 @@ func (t *EditTool) Schema() json.RawMessage {
 }
 
 func (t *EditTool) Gated() bool { return true }
+
+func (t *EditTool) Category() string { return permissions.CategoryEdit }
 
 type editArgs struct {
 	FilePath   string `json:"file_path"`
@@ -62,7 +66,7 @@ func (t *EditTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("cannot read %s: %w", path, err)
 	}
-	if isBinary(data) {
+	if IsBinary(data) {
 		return "", fmt.Errorf("%s appears to be binary and cannot be edited as text", path)
 	}
 	content := string(data)
@@ -88,6 +92,6 @@ func (t *EditTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	if err := os.WriteFile(path, []byte(updated), mode); err != nil {
 		return "", fmt.Errorf("cannot write %s: %w", path, err)
 	}
-	t.Tracker.MarkRead(path)
+	t.Tracker.MarkEdited(path)
 	return fmt.Sprintf("Edited %s: replaced %d occurrence(s).", path, replaced), nil
 }

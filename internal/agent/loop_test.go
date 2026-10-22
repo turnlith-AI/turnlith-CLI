@@ -70,7 +70,7 @@ func TestRunToolRoundTrip(t *testing.T) {
 	runner := &Runner{
 		Client:       client,
 		Tools:        registry,
-		Policy:       &permissions.Policy{Yolo: true},
+		Policy:       &permissions.Policy{Mode: permissions.ModeYolo},
 		Agent:        "helper",
 		SystemPrompt: "you are a test",
 	}
@@ -199,7 +199,7 @@ func TestRunUnknownTool(t *testing.T) {
 	runner := &Runner{
 		Client:       api.New(srv.URL, "sk-test"),
 		Tools:        tools.NewRegistry(),
-		Policy:       &permissions.Policy{Yolo: true},
+		Policy:       &permissions.Policy{Mode: permissions.ModeYolo},
 		Agent:        "helper",
 		SystemPrompt: "test",
 	}
