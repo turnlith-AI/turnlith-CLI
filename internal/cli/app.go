@@ -49,6 +49,11 @@ type app struct {
 	stats   runStats
 	onEvent func(map[string]any)
 
+	// pendingNotes are facts for the model's next prompt that did not come from
+	// its own tool calls (the user ran /undo); lastAnswer feeds /copy.
+	pendingNotes []string
+	lastAnswer   string
+
 	// instructions are the TLC.md / AGENTS.md / CLAUDE.md files in the system prompt.
 	instructions []agent.Instructions
 

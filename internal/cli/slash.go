@@ -28,6 +28,12 @@ var slashHandlers = map[string]slashHandler{
 	"/verbose":     (*app).slashVerbose,
 	"/files":       (*app).slashFiles,
 	"/init":        (*app).slashInit,
+	"/undo":        (*app).slashUndo,
+	"/diff":        (*app).slashDiff,
+	"/copy":        (*app).slashCopy,
+	"/resume":      (*app).slashResume,
+	"/doctor":      (*app).slashDoctor,
+	"/edit":        (*app).slashEdit,
 	"/permissions": (*app).slashPermissions,
 	"/yolo":        (*app).slashYolo,
 }

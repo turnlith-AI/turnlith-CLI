@@ -64,7 +64,7 @@ func (a *app) pickAgent() error {
 func (a *app) setAgentByName(name string, remember bool) error {
 	for _, ag := range a.agents {
 		if strings.EqualFold(ag.Codename, name) {
-			changed := a.agent.Codename != ag.Codename
+			changed := a.agent.Codename != "" && a.agent.Codename != ag.Codename
 			a.agent = ag
 			a.runner.SetAgent(ag.Codename)
 			a.refreshSystemPrompt()

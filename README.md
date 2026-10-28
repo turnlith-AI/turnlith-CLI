@@ -257,9 +257,10 @@ like `node_modules` are skipped) with the files this session has read,
 written, or edited pinned on top; picking one pre-fills the prompt with its
 `@mention`. Mentions work in one-shot mode too: `tlc -p "explain @main.go"`.
 
-In the REPL: `/help`, `/clear`, `/init`, `/files`, `/agent [name|new]`, `/agents`,
-`/model [spec] [effort]`, `/effort [level]`, `/status`, `/permissions
-[normal|auto|plan|yolo]`, `/verbose`, `/yolo`, `/exit`; typing `/` prints the
+In the REPL: `/help`, `/clear`, `/init`, `/undo`, `/diff`, `/copy`, `/resume`, `/doctor`,
+`/edit`, `/files`, `/agent [name|new]`, `/agents`, `/model [spec] [effort]`,
+`/effort [level]`, `/status`, `/permissions [normal|auto|plan|yolo]`, `/verbose`,
+`/yolo`, `/exit`; typing `/` prints the
 command menu and `TAB` completes commands, their arguments (agent codenames,
 model ids, effort levels, permission modes), and `@file` mentions. `/model`
 and `/effort` persist on the agent server-side, so the change applies to
@@ -292,6 +293,29 @@ The test suite includes `internal/cli/cli_test.go`, which drives the real
 streamed `/v1/chat/completions`, `/v1/mcp`), covering the tool round trip,
 permission denials, `--yolo`, MCP memory search, and error mapping.
 
+**Working with the agent's changes.** Edits and writes show up as numbered,
+colored diffs in the transcript, and the permission prompt shows the same diff
+*before* you answer; an edit that cannot apply (text not found, file never
+read) goes straight back to the model instead of asking you. `/diff` shows what
+the session changed (via git, including new files), `/undo` reverts the last
+change (repeatable; it refuses if you edited the file since, unless you say
+`/undo force`, and the agent is told so it re-reads the file), and `/copy` puts
+the last answer on the clipboard (system tools, or OSC 52 over ssh).
+
+**Sessions.** `/resume` lists earlier sessions in this directory and continues
+one (switching to the agent it was with, since memory is per agent); `-c`
+continues the latest one, preferring the current agent. Long prompts: end a line
+with `\` to continue on the next, or run `/edit` to write the prompt in
+`$VISUAL`/`$EDITOR`. Every prompt ends with a dim cost line
+(`· 4.2k context · 87 out · 2 turns · 6.3s`).
+
+**When something is wrong.** `tlc doctor` (or `/doctor`) checks the saved
+connection, TLS/URL safety, server health, the key, the agent and whether its
+provider has credentials server-side, then the terminal, shell, git, ripgrep,
+file permissions and the project instructions it would load — with a fix for
+each problem. `tlc completion bash|zsh|fish` prints a completion script
+generated from the real flags; `tlc <command> --help` shows per-command help.
+
 Independent read-only tool calls from one model turn (`Read`, `Glob`, `Grep`,
 `SearchMemory`) run in parallel; anything that changes state, or asks, runs one
 at a time in the order requested.
@@ -302,7 +326,7 @@ at a time in the order requested.
 cmd/tlc/            entry point
 internal/api/       facade SSE client, MCP client, wire types
 internal/agent/     tool loop + system prompt
-internal/tools/     Read, Write, Edit, Bash, Glob, Grep, SearchMemory
+internal/tools/     Read, Write, Edit, Bash, Glob, Grep, SearchMemory, TodoWrite
 internal/permissions/  gated-tool approval policy
 internal/ui/        theme, streaming markdown renderer, readline REPL
 internal/cli/       argument handling, REPL, print mode, install/uninstall

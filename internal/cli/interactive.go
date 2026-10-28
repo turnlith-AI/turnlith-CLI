@@ -51,7 +51,7 @@ func (a *app) runInteractive() int {
 
 	interrupts := 0
 	for {
-		line, err := a.repl.Readline()
+		line, err := a.readInput()
 		if errors.Is(err, ui.ErrInterrupt) {
 			// one Ctrl-C clears the line; a second in a row quits
 			if interrupts > 0 {
@@ -120,7 +120,7 @@ func (a *app) printBanner() {
 	if a.policy.Mode != permissions.ModeAsk {
 		modeHint = " · permissions: " + a.policy.Mode.String()
 	}
-	a.renderer.Infof("%s", a.theme.Faint("type /help for commands · Tab toggles auto-accept edits · /exit to quit"+modeHint))
+	a.renderer.Infof("%s", a.theme.Faint("type /help for commands · Tab cycles permission modes · /exit to quit"+modeHint))
 	for _, note := range a.notes {
 		a.renderer.Notice(note)
 	}
@@ -151,7 +151,7 @@ func (a *app) setPermissionMode(mode permissions.Mode) {
 
 func (a *app) openTranscript(cont bool) {
 	if cont {
-		session, entries, err := history.Continue(a.cwd)
+		session, entries, err := history.ContinueFor(a.cwd, a.agent.Codename)
 		if err == nil && session != nil {
 			a.transcript = session
 			if session.Agent != "" && session.Agent != a.agent.Codename {
@@ -205,7 +205,7 @@ func indentBlock(text, indent string) string {
 // runWithCancel runs one prompt with Ctrl-C cancelling the run. The raw text
 // is kept for the transcript; @file mentions are expanded on the wire.
 func (a *app) runWithCancel(prompt string) {
-	wire := a.attachMentions(prompt, a.renderer)
+	wire := a.withPendingNotes(a.attachMentions(prompt, a.renderer))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sigCh := make(chan os.Signal, 1)

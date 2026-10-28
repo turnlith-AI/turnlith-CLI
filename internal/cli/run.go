@@ -95,13 +95,13 @@ func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity
 			// only slow tools earn a spinner; quick reads never flash one
 			startSpinner("running "+name+"…", 400*time.Millisecond)
 		},
-		OnToolEnd: func(name, result string, denied bool, elapsed time.Duration) {
+		OnToolEnd: func(o agent.ToolOutcome) {
 			stopSpinner()
-			activity.ToolResult(result, denied, elapsed)
+			activity.ToolResult(o.Name, o.Result, o.Display, o.Denied, o.Elapsed)
 			a.emit(map[string]any{
-				"type": "tool_result", "name": name, "denied": denied,
-				"is_error": denied || strings.HasPrefix(result, "Error:"),
-				"content":  truncateForEvent(result),
+				"type": "tool_result", "name": o.Name, "denied": o.Denied,
+				"is_error": o.Denied || strings.HasPrefix(o.Result, "Error:"),
+				"content":  truncateForEvent(o.Result),
 			})
 			startSpinner("thinking…", 0)
 		},
@@ -119,9 +119,17 @@ func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity
 			}
 		},
 	}
+	started := time.Now()
 	err := a.runner.Run(ctx, wire, events)
 	stopSpinner()
 	out.EndText()
+	if strings.TrimSpace(a.stats.lastText) != "" {
+		a.lastAnswer = a.stats.lastText
+	}
+	// interactive sessions get the cost of every prompt; scripts only when asked
+	if !a.opts.print && !a.verbose && a.stats.turns > 0 {
+		activity.RunSummary(a.stats.contextTokens, a.stats.outputTokens, a.stats.turns, time.Since(started))
+	}
 
 	// In print mode out is stdout and activity is stderr, so errors and tool
 	// activity never pollute piped assistant text; interactively both are

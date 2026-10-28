@@ -33,6 +33,17 @@ type Runner struct {
 	history []api.Message
 }
 
+// ToolOutcome describes one finished tool call for display. Result is what
+// the model was told; Display, when set, is what the user should see instead
+// (a diff for an edit).
+type ToolOutcome struct {
+	Name    string
+	Result  string
+	Display string
+	Denied  bool
+	Elapsed time.Duration
+}
+
 // Events receives loop progress for display.
 type Events struct {
 	OnText      func(delta string)
@@ -41,7 +52,7 @@ type Events struct {
 	// OnToolExec fires once a call is cleared to run (after any permission
 	// prompt), right before the tool starts — the moment to show activity.
 	OnToolExec func(name string)
-	OnToolEnd  func(name, result string, denied bool, elapsed time.Duration)
+	OnToolEnd  func(ToolOutcome)
 	OnNotice   func(msg string)
 	OnUsage    func(usage api.Usage)
 }
@@ -161,7 +172,7 @@ func (r *Runner) executeCalls(ctx context.Context, calls []api.ToolCall, ev Even
 			j++
 		}
 		if j-i >= 2 {
-			r.runBatch(ctx, calls[i:j], results[i:j], ev)
+			copy(results[i:j], r.runBatch(ctx, calls[i:j], ev))
 			i = j
 			continue
 		}
@@ -178,7 +189,8 @@ func (r *Runner) executeCalls(ctx context.Context, calls []api.ToolCall, ev Even
 // runBatch executes safe calls concurrently, then reports them to the UI in
 // order as ordinary start/end pairs (output from overlapping calls would
 // otherwise interleave).
-func (r *Runner) runBatch(ctx context.Context, calls []api.ToolCall, results []string, ev Events) {
+func (r *Runner) runBatch(ctx context.Context, calls []api.ToolCall, ev Events) []string {
+	outs := make([]tools.Result, len(calls))
 	elapsed := make([]time.Duration, len(calls))
 	sem := make(chan struct{}, maxParallelTools)
 	var wg sync.WaitGroup
@@ -189,86 +201,108 @@ func (r *Runner) runBatch(ctx context.Context, calls []api.ToolCall, results []s
 			defer wg.Done()
 			defer func() { <-sem }()
 			start := time.Now()
-			results[i] = r.runTool(ctx, calls[i].Function.Name, calls[i].Function.Arguments)
+			outs[i] = r.runTool(ctx, calls[i].Function.Name, calls[i].Function.Arguments)
 			elapsed[i] = time.Since(start)
 		}(i)
 	}
 	wg.Wait()
+	texts := make([]string, len(calls))
 	for i, call := range calls {
+		texts[i] = outs[i].Text
 		if ev.OnToolStart != nil {
 			ev.OnToolStart(call.Function.Name, call.Function.Arguments)
 		}
 		if ev.OnToolEnd != nil {
-			ev.OnToolEnd(call.Function.Name, results[i], false, elapsed[i])
+			ev.OnToolEnd(ToolOutcome{Name: call.Function.Name, Result: outs[i].Text, Display: outs[i].Display, Elapsed: elapsed[i]})
 		}
 	}
+	return texts
 }
 
-// execute runs one tool call behind the permission gate.
+// execute runs one tool call: validate it, ask permission if it needs any,
+// run it. A call that cannot work (text not found, file never read) comes back
+// as an error without bothering the user.
 func (r *Runner) execute(ctx context.Context, call api.ToolCall, ev Events) (string, error) {
 	name := call.Function.Name
+	args := json.RawMessage(call.Function.Arguments)
 	if ev.OnToolStart != nil {
 		ev.OnToolStart(name, call.Function.Arguments)
 	}
-	start := time.Now()
+	var elapsed time.Duration // the tool's own run time, not the wait at a prompt
 
 	tool, known := r.Tools.Get(name)
-	// A tool may be free in general yet need a yes for particular arguments
-	// (a Read outside the working directory).
-	var external bool
-	var reason string
-	if g, ok := tool.(tools.ArgGater); known && ok {
-		reason, external = g.NeedsPermission(json.RawMessage(call.Function.Arguments))
-	}
-	var result string
+	var res tools.Result
 	denied := false
 	switch {
 	case !known:
-		result = fmt.Sprintf("Error: unknown tool %q — available: %s", name, strings.Join(r.Tools.Names(), ", "))
-	case tool.Gated() || external:
-		summary, preview := ui.ToolCallSummary(name, call.Function.Arguments)
-		approved, err := r.Policy.Approve(ctx, permissions.Request{
-			Tool:     name,
-			Category: tool.Category(),
-			Summary:  summary,
-			Preview:  preview,
-			Subject:  tools.Subject(r.Root, name, json.RawMessage(call.Function.Arguments)),
-			External: external,
-			Reason:   reason,
-		})
-		if err != nil {
-			return "", err
-		}
-		if !approved {
-			denied = true
-			result = r.Policy.DenialFor(name)
-		} else {
-			result = r.runTool(ctx, name, call.Function.Arguments)
-		}
+		res.Text = fmt.Sprintf("Error: unknown tool %q — available: %s", name, strings.Join(r.Tools.Names(), ", "))
 	default:
-		result = r.runTool(ctx, name, call.Function.Arguments)
+		var preview string
+		var prepErr error
+		if p, ok := tool.(tools.Preparer); ok {
+			preview, prepErr = p.Prepare(args)
+		}
+		// A tool may be free in general yet need a yes for particular
+		// arguments (a Read outside the working directory).
+		var external bool
+		var reason string
+		if g, ok := tool.(tools.ArgGater); ok {
+			reason, external = g.NeedsPermission(args)
+		}
+		switch {
+		case prepErr != nil:
+			res.Text = "Error: " + prepErr.Error()
+		case tool.Gated() || external:
+			summary, uiPreview := ui.ToolCallSummary(name, call.Function.Arguments)
+			if preview != "" {
+				uiPreview = preview
+			}
+			approved, err := r.Policy.Approve(ctx, permissions.Request{
+				Tool:     name,
+				Category: tool.Category(),
+				Summary:  summary,
+				Preview:  uiPreview,
+				Subject:  tools.Subject(r.Root, name, args),
+				External: external,
+				Reason:   reason,
+			})
+			if err != nil {
+				return "", err
+			}
+			if !approved {
+				denied = true
+				res.Text = r.Policy.DenialFor(name)
+			} else {
+				res, elapsed = r.timedExec(ctx, name, call.Function.Arguments, ev)
+			}
+		default:
+			res, elapsed = r.timedExec(ctx, name, call.Function.Arguments, ev)
+		}
 	}
 
 	if ev.OnToolEnd != nil {
-		ev.OnToolEnd(name, result, denied, time.Since(start))
+		ev.OnToolEnd(ToolOutcome{Name: name, Result: res.Text, Display: res.Display, Denied: denied, Elapsed: elapsed})
 	}
-	return result, nil
+	return res.Text, nil
 }
 
-func (r *Runner) execTool(ctx context.Context, name, rawArgs string, ev Events) string {
+// timedExec announces and runs a cleared call and reports how long it took.
+func (r *Runner) timedExec(ctx context.Context, name, rawArgs string, ev Events) (tools.Result, time.Duration) {
 	if ev.OnToolExec != nil {
 		ev.OnToolExec(name)
 	}
-	return r.runTool(ctx, name, rawArgs)
+	start := time.Now()
+	res := r.runTool(ctx, name, rawArgs)
+	return res, time.Since(start)
 }
 
-func (r *Runner) runTool(ctx context.Context, name, rawArgs string) string {
-	out, err := r.Tools.Run(ctx, name, json.RawMessage(rawArgs))
+func (r *Runner) runTool(ctx context.Context, name, rawArgs string) tools.Result {
+	res, err := r.Tools.RunResult(ctx, name, json.RawMessage(rawArgs))
 	if err != nil {
 		if ctx.Err() != nil {
-			return "Error: interrupted"
+			return tools.Result{Text: "Error: interrupted"}
 		}
-		return "Error: " + err.Error()
+		return tools.Result{Text: "Error: " + err.Error()}
 	}
-	return out
+	return res
 }

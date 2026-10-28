@@ -81,32 +81,17 @@ func (r *Renderer) ToolStart(name, summary string) {
 	r.writeLocked(line + "\n")
 }
 
-// ToolResult prints the (display-truncated) tool result below its call.
-func (r *Renderer) ToolResult(result string, denied bool, elapsed time.Duration) {
+// ToolResult prints a tool's outcome below its call: a one-line summary, a
+// colored diff, or the head and tail of command output (see summarizeResult).
+func (r *Renderer) ToolResult(name, result, display string, denied bool, elapsed time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	indent := "  " + r.Theme.Dim(GlyphResult) + "  "
-
-	var lines []string
-	if denied {
-		lines = []string{r.Theme.Yellow("denied by the user")}
-	} else {
-		lines = strings.Split(sanitizeBlock(result), "\n")
-	}
-	const maxLines = 5
-	shown := lines
-	if len(shown) > maxLines {
-		shown = shown[:maxLines]
-	}
-	for i, line := range shown {
+	for i, line := range summarizeResult(name, result, display, denied) {
+		prefix := strings.Repeat(" ", 5)
 		if i == 0 {
-			fmt.Fprintf(r.Out, "%s%s\n", indent, styleResultLine(r, line))
-		} else {
-			fmt.Fprintf(r.Out, "%s%s\n", strings.Repeat(" ", 5), styleResultLine(r, line))
+			prefix = "  " + r.Theme.Dim(GlyphResult) + "  "
 		}
-	}
-	if len(lines) > maxLines {
-		fmt.Fprintf(r.Out, "%s%s\n", strings.Repeat(" ", 5), r.Theme.Faint(fmt.Sprintf("… (+%d more lines)", len(lines)-maxLines)))
+		fmt.Fprintf(r.Out, "%s%s\n", prefix, r.styleResult(line))
 	}
 	if elapsed > 1200*time.Millisecond {
 		fmt.Fprintf(r.Out, "%s%s\n", strings.Repeat(" ", 5), r.Theme.Faint(fmt.Sprintf("(%s)", elapsed.Round(100*time.Millisecond))))
@@ -114,11 +99,25 @@ func (r *Renderer) ToolResult(result string, denied bool, elapsed time.Duration)
 	r.lastByte = '\n'
 }
 
-func styleResultLine(r *Renderer, line string) string {
-	if strings.HasPrefix(line, "Error:") {
-		return r.Theme.Red(line)
+func (r *Renderer) styleResult(l resultLine) string {
+	switch l.Kind {
+	case kindErr, kindDel:
+		return r.Theme.Red(l.Text)
+	case kindAdd:
+		return r.Theme.Green(l.Text)
+	case kindWarn:
+		return r.Theme.Yellow(l.Text)
+	case kindFaint, kindDone:
+		return r.Theme.Faint(l.Text)
+	case kindActive:
+		return r.Theme.Accent(l.Text)
+	case kindSummary:
+		return r.Theme.Gray(l.Text)
+	case kindPlain:
+		return l.Text
+	default:
+		return r.Theme.Dim(l.Text)
 	}
-	return r.Theme.Dim(line)
 }
 
 // Notice prints a dim informational line.
@@ -157,6 +156,48 @@ func (r *Renderer) UsageLine(contextTokens, outputTokens int) {
 	defer r.mu.Unlock()
 	r.writeLocked(r.Theme.Faint(fmt.Sprintf("· %s context · %s output", humanTokens(contextTokens), humanTokens(outputTokens))) + "\n")
 	r.lastByte = '\n'
+}
+
+// RunSummary prints the one-line cost of a finished prompt: context size, tokens
+// generated, turns taken, wall time.
+func (r *Renderer) RunSummary(contextTokens, outputTokens, turns int, elapsed time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lastByte != 0 && r.lastByte != '\n' {
+		r.writeLocked("\n")
+	}
+	r.writeLocked(r.Theme.Faint("· "+formatRunSummary(contextTokens, outputTokens, turns, elapsed)) + "\n")
+}
+
+// formatRunSummary renders "4.2k context · 87 out · 2 turns · 6.3s", leaving
+// out what is zero or unremarkable (a single turn).
+func formatRunSummary(contextTokens, outputTokens, turns int, elapsed time.Duration) string {
+	var parts []string
+	if contextTokens > 0 {
+		parts = append(parts, compactTokens(contextTokens)+" context")
+	}
+	if outputTokens > 0 {
+		parts = append(parts, compactTokens(outputTokens)+" out")
+	}
+	if turns > 1 {
+		parts = append(parts, fmt.Sprintf("%d turns", turns))
+	}
+	parts = append(parts, compactDuration(elapsed))
+	return strings.Join(parts, " · ")
+}
+
+func compactTokens(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func compactDuration(d time.Duration) string {
+	if d >= time.Minute {
+		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
 }
 
 func humanTokens(n int) string {
@@ -203,20 +244,16 @@ func (r *Renderer) permissionOptions(v PermissionView) string {
 	return r.Theme.Dim(strings.Join(parts, " · "))
 }
 
-// PermissionBlock renders a gated tool call — a header naming the tool and
-// what it will do, a warning if the call is unusual, the diff-colored preview,
-// and the answer options — before the REPL reads the one-key answer.
+// PermissionBlock renders what a gated call is about to do — a warning if it
+// is unusual, the diff-colored preview, and the answer options — below the
+// "⏺ Tool(summary)" line the transcript has already printed for it, before the
+// REPL reads the one-key answer.
 func (r *Renderer) PermissionBlock(v PermissionView) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.lastByte != 0 && r.lastByte != '\n' {
 		r.writeLocked("\n")
 	}
-	header := "  " + r.Theme.Accent(GlyphTool) + " " + r.Theme.Bold(v.Tool)
-	if v.Summary != "" {
-		header += r.Theme.Dim("(" + sanitizeInline(v.Summary) + ")")
-	}
-	r.writeLocked(header + "\n")
 	if v.Note != "" {
 		r.writeLocked("    " + r.Theme.Yellow("⚠ "+sanitizeInline(v.Note)) + "\n")
 	}

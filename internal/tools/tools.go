@@ -30,6 +30,29 @@ type Tool interface {
 	Run(ctx context.Context, args json.RawMessage) (string, error)
 }
 
+// Result is what a tool call produced: Text goes to the model, Display (when
+// set) is what the user sees in the transcript instead — a diff for an edit,
+// where the model only needs a one-line confirmation.
+type Result struct {
+	Text    string
+	Display string
+}
+
+// ResultRunner is implemented by tools that have something richer to show the
+// user than the text they hand the model.
+type ResultRunner interface {
+	RunResult(ctx context.Context, args json.RawMessage) (Result, error)
+}
+
+// Preparer is implemented by tools that can check a call and describe its
+// effect without performing it. The agent loop calls it before asking for
+// permission: a call that cannot work (text not found, file unread) comes
+// straight back to the model as an error instead of bothering the user, and
+// the returned preview (a diff) is what the permission prompt shows.
+type Preparer interface {
+	Prepare(args json.RawMessage) (preview string, err error)
+}
+
 // ArgGater is implemented by tools whose need for permission depends on the
 // arguments of a call (a Read is free inside the workspace but asks outside
 // it). Calls that need permission are "external": auto mode does not wave them
@@ -82,6 +105,20 @@ func (r *Registry) Names() []string {
 	return names
 }
 
+// RunResult executes a tool by name, returning the user-facing display too
+// when the tool provides one.
+func (r *Registry) RunResult(ctx context.Context, name string, args json.RawMessage) (Result, error) {
+	t, ok := r.byName[name]
+	if !ok {
+		return Result{}, fmt.Errorf("unknown tool %q — available: %s", name, strings.Join(r.Names(), ", "))
+	}
+	if rr, ok := t.(ResultRunner); ok {
+		return rr.RunResult(ctx, args)
+	}
+	text, err := t.Run(ctx, args)
+	return Result{Text: text}, err
+}
+
 // Run executes a tool by name.
 func (r *Registry) Run(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	t, ok := r.byName[name]
@@ -115,6 +152,7 @@ type Tracker struct {
 	mu    sync.Mutex
 	read  map[string]fileStamp
 	files map[string]*FileActivity
+	undo  []undoEntry
 }
 
 func NewTracker() *Tracker {

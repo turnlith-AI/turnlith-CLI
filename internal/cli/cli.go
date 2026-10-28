@@ -19,13 +19,21 @@ func Main(argv []string) int {
 	}
 	switch opts.command {
 	case "help":
-		fmt.Print(helpText)
+		if topic, ok := helpTopics[opts.helpTopic]; ok {
+			fmt.Print(topic)
+		} else {
+			fmt.Print(helpText)
+		}
 		return 0
 	case "version":
 		fmt.Println(version.Version)
 		return 0
 	case "configure":
 		return runConfigure(opts)
+	case "doctor":
+		return runDoctor(opts)
+	case "completion":
+		return runCompletion(opts.prompt)
 	case "install":
 		return runInstall(opts)
 	case "uninstall":

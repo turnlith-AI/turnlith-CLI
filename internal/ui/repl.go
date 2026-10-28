@@ -126,6 +126,14 @@ func (r *REPL) Readline() (string, error) {
 	return line, err
 }
 
+// ReadlineWithPrompt reads one line under a temporary prompt (a continuation
+// marker), then restores the mode prompt.
+func (r *REPL) ReadlineWithPrompt(prompt string) (string, error) {
+	r.rl.SetPrompt(prompt)
+	defer r.rl.SetPrompt(r.modePrompt)
+	return r.Readline()
+}
+
 // ReadSecret reads a hidden value (api key entry).
 func (r *REPL) ReadSecret(prompt string) (string, error) {
 	raw, err := r.rl.ReadPassword(prompt)

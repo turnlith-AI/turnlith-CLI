@@ -83,9 +83,9 @@ func runCalls(t *testing.T, reg *tools.Registry, calls []string, policy *permiss
 	start := time.Now()
 	err := runner.Run(context.Background(), "go", Events{
 		OnToolStart: func(name, raw string) { mu.Lock(); events = append(events, "start:"+name+raw); mu.Unlock() },
-		OnToolEnd: func(name, result string, denied bool, _ time.Duration) {
+		OnToolEnd: func(o ToolOutcome) {
 			mu.Lock()
-			events = append(events, "end:"+name+":"+result)
+			events = append(events, "end:"+o.Name+":"+o.Result)
 			mu.Unlock()
 		},
 	})

@@ -46,7 +46,9 @@ func Start(cwd, agent string) (*Session, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	name := fmt.Sprintf("%s-%d.jsonl", time.Now().UTC().Format("20060102T150405"), os.Getpid())
+	// microseconds keep sessions started in the same instant apart, and the
+	// fixed-width stamp sorts newest-last as text
+	name := fmt.Sprintf("%s-%d.jsonl", time.Now().UTC().Format("20060102T150405.000000"), os.Getpid())
 	path := filepath.Join(dir, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -86,68 +88,140 @@ func (s *Session) Close() error {
 
 // Continue reopens the newest transcript for cwd (if any) and returns its
 // entries for replay.
-func Continue(cwd string) (*Session, []Entry, error) {
+func Continue(cwd string) (*Session, []Entry, error) { return ContinueFor(cwd, "") }
+
+// ContinueFor is Continue preferring the newest transcript made with the given
+// agent (server memory is per agent), falling back to the newest overall.
+func ContinueFor(cwd, agent string) (*Session, []Entry, error) {
+	infos, err := List(cwd, 0)
+	if err != nil || len(infos) == 0 {
+		return nil, nil, err
+	}
+	pick := infos[0]
+	if agent != "" {
+		for _, in := range infos {
+			if in.Agent == agent {
+				pick = in
+				break
+			}
+		}
+	}
+	return Open(pick.Path)
+}
+
+// Info summarizes one stored transcript for a picker.
+type Info struct {
+	Path     string
+	Agent    string
+	Started  time.Time
+	Messages int
+	Preview  string // the first thing the user asked, shortened
+}
+
+// listScanLimit bounds how many of the newest files List will look at.
+const listScanLimit = 300
+
+// List returns the transcripts for cwd, newest first; limit <= 0 means all.
+func List(cwd string, limit int) ([]Info, error) {
 	dir := sessionsDir()
 	names, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil, nil
+			return nil, nil
 		}
-		return nil, nil, err
+		return nil, err
 	}
 	sort.Slice(names, func(i, j int) bool { return names[i].Name() > names[j].Name() })
-	for _, de := range names {
+	var out []Info
+	for scanned, de := range names {
+		if scanned >= listScanLimit || (limit > 0 && len(out) >= limit) {
+			break
+		}
 		if de.IsDir() || !strings.HasSuffix(de.Name(), ".jsonl") {
 			continue
 		}
 		path := filepath.Join(dir, de.Name())
-		session, entries, err := readSession(path, cwd)
-		if err != nil {
-			continue
+		info, ok := scanInfo(path, cwd)
+		if ok {
+			out = append(out, info)
 		}
-		if session == nil {
-			continue // different cwd
-		}
-		session.file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
-		if err != nil {
-			return nil, nil, err
-		}
-		return session, entries, nil
 	}
-	return nil, nil, nil
+	return out, nil
 }
 
-// readSession returns the session when its meta line matches cwd.
-func readSession(path, cwd string) (*Session, []Entry, error) {
+// scanInfo reads one transcript's summary if it belongs to cwd.
+func scanInfo(path, cwd string) (Info, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, err
+		return Info{}, false
 	}
 	defer f.Close()
-
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	var (
-		session *Session
-		entries []Entry
-	)
+	info := Info{Path: path}
+	matched := false
 	for scanner.Scan() {
 		var r record
-		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+		if json.Unmarshal(scanner.Bytes(), &r) != nil {
 			continue
 		}
 		switch r.Type {
 		case "meta":
 			if r.Cwd != cwd {
-				return nil, nil, nil
+				return Info{}, false
 			}
+			matched = true
+			info.Agent, info.Started = r.Agent, r.Ts
+		case "user", "assistant":
+			info.Messages++
+			if info.Preview == "" && r.Type == "user" {
+				info.Preview = preview(r.Text)
+			}
+		}
+	}
+	return info, matched
+}
+
+// preview flattens a message to one short line.
+func preview(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if r := []rune(text); len(r) > 72 {
+		return string(r[:72]) + "…"
+	}
+	return text
+}
+
+// Open reopens one stored transcript for appending and returns its entries.
+func Open(path string) (*Session, []Entry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var (
+		session *Session
+		entries []Entry
+	)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var r record
+		if json.Unmarshal(scanner.Bytes(), &r) != nil {
+			continue
+		}
+		switch r.Type {
+		case "meta":
 			session = &Session{Path: path, Agent: r.Agent}
 		case "user", "assistant":
 			entries = append(entries, Entry{Ts: r.Ts, Role: r.Type, Text: r.Text})
 		}
 	}
+	_ = f.Close()
 	if session == nil {
-		return nil, nil, nil
+		return nil, nil, fmt.Errorf("%s is not a tlc transcript", path)
+	}
+	session.file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, nil, err
 	}
 	return session, entries, nil
 }

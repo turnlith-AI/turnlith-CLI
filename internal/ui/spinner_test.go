@@ -53,3 +53,5 @@ func TestSpinnerStopIsIdempotentAndNilSafe(t *testing.T) {
 	sp.Stop()
 	sp.Stop()
 }
+
+func durMs(ms int) time.Duration { return time.Duration(ms) * time.Millisecond }

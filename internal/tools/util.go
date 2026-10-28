@@ -406,6 +406,23 @@ func (b *headTailBuffer) String() string {
 	return string(b.head) + fmt.Sprintf("\n… (%d bytes of output omitted) …\n", dropped) + string(tail)
 }
 
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// changeDisplay summarizes a text change for the transcript: counts, then the
+// numbered diff.
+func changeDisplay(before, after string) string {
+	diff, added, removed := Diff(before, after, 2, 30)
+	if diff == "" {
+		return "No changes (the new content matches the file)"
+	}
+	return fmt.Sprintf("Added %s, removed %s\n%s", plural(added, "line"), plural(removed, "line"), diff)
+}
+
 // lineCount counts lines in s, treating a trailing newline as a terminator.
 func lineCount(s string) int {
 	if s == "" {

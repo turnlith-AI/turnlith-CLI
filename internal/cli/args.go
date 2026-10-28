@@ -22,6 +22,8 @@ Commands:
   tlc agents                 list the workspace's agents
   tlc agents create          create an agent (interactive, needs an admin key)
   tlc configure              save the server URL and api key
+  tlc doctor                 check the connection, key, agent and local tools
+  tlc completion <shell>     print a completion script (bash, zsh, fish)
   tlc install [opencode]     wire the server's agents into opencode (provider + MCP)
   tlc uninstall [opencode]   remove the turnlith blocks from the opencode config
   tlc help | version         (also -h/--help and -v/--version)
@@ -65,7 +67,7 @@ In the REPL: /help /clear /files /agent /agents /model /effort /status /permissi
 `
 
 type options struct {
-	command string // "", "configure", "agents", "agents-create", "install", "uninstall", "help", "version"
+	command string // "", "configure", "doctor", "agents", "agents-create", "install", "uninstall", "help", "version"
 	print   bool
 	cont    bool
 	agent   string
@@ -85,6 +87,11 @@ type options struct {
 	maxTurns        int      // --max-turns, 0 = default
 	outputFormat    string   // --output-format text|json|stream-json
 
+	// help: -h/--help (or `tlc help <topic>`) asks for help, per command when
+	// a command was given
+	wantHelp  bool
+	helpTopic string
+
 	// `tlc agents create`
 	name   string
 	label  string
@@ -103,7 +110,7 @@ type options struct {
 // `--flag=v`). Both are tables so a new flag is one line, and a test checks
 // every flag is documented in the help text.
 var boolFlags = map[string]func(*options){
-	"-h": func(o *options) { o.command = "help" }, "--help": func(o *options) { o.command = "help" },
+	"-h": func(o *options) { o.wantHelp = true }, "--help": func(o *options) { o.wantHelp = true },
 	"-v": func(o *options) { o.command = "version" }, "--version": func(o *options) { o.command = "version" },
 	"-p": func(o *options) { o.print = true }, "--print": func(o *options) { o.print = true },
 	"-c": func(o *options) { o.cont = true }, "--continue": func(o *options) { o.cont = true },
@@ -220,10 +227,17 @@ func parseArgs(argv []string) (options, error) {
 			return opts, fmt.Errorf("unknown flag %q", arg)
 		default:
 			if !seenPositional && (arg == "configure" || arg == "agents" || arg == "help" || arg == "version" ||
-				arg == "install" || arg == "uninstall") {
+				arg == "install" || arg == "uninstall" || arg == "doctor" || arg == "completion") {
 				opts.command = arg
 				seenPositional = true
 				continue
+			}
+			// `tlc help <topic>`
+			if opts.command == "help" && opts.helpTopic == "" {
+				if _, ok := helpTopics[arg]; ok {
+					opts.helpTopic = arg
+					continue
+				}
 			}
 			// one subcommand right after `agents`
 			if opts.command == "agents" && !seenSub && len(promptWords) == 0 {
@@ -249,6 +263,12 @@ func parseArgs(argv []string) (options, error) {
 			seenPositional = true
 			promptWords = append(promptWords, arg)
 		}
+	}
+	if opts.wantHelp {
+		if _, ok := helpTopics[opts.command]; ok {
+			opts.helpTopic = opts.command
+		}
+		opts.command = "help"
 	}
 	opts.prompt = strings.TrimSpace(strings.Join(promptWords, " "))
 	if opts.command == "agents-create" && opts.prompt != "" {
