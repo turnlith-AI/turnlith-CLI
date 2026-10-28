@@ -13,6 +13,15 @@ import (
 	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
 
+// Output limits: each stream is captured head+tail (a build log's cause is at
+// the end), and the combined result handed to the model keeps both ends too.
+const (
+	bashCaptureHead = 256 * 1024
+	bashCaptureTail = 768 * 1024
+	bashResultHead  = 8 * 1024
+	bashResultTail  = 22 * 1024
+)
+
 // BashTool runs shell commands in the project root.
 type BashTool struct {
 	Root           string
@@ -83,8 +92,8 @@ func (t *BashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	}
 	cmd := exec.CommandContext(ctx, shell, shellArgs...)
 	cmd.Dir = t.Root
-	stdout := newLimitedBuffer(1024 * 1024)
-	stderr := newLimitedBuffer(1024 * 1024)
+	stdout := newHeadTailBuffer(bashCaptureHead, bashCaptureTail)
+	stderr := newHeadTailBuffer(bashCaptureHead, bashCaptureTail)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	setProcessGroup(cmd)
@@ -130,5 +139,5 @@ func (t *BashTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	case runErr != nil:
 		fmt.Fprintf(&b, "\nError: %v", runErr)
 	}
-	return truncateText(b.String(), 30000), nil
+	return truncateMiddle(b.String(), bashResultHead, bashResultTail), nil
 }

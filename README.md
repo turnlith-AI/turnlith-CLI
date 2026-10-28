@@ -28,7 +28,7 @@ assembles the rest of the context from the agent's session memory. Close the
 laptop, reopen it, and the agent still remembers the project.
 
 Tools run **locally** — the server never sees your filesystem. The CLI offers
-seven tools, matching the harness vocabulary:
+eight tools, matching the harness vocabulary:
 
 | Tool           | What it does                              | Asks first? |
 | -------------- | ----------------------------------------- | :---------: |
@@ -36,27 +36,87 @@ seven tools, matching the harness vocabulary:
 | `Glob`         | find files by pattern                      |      —      |
 | `Grep`         | search file contents (ripgrep if present)  |      —      |
 | `SearchMemory` | ask the agent's server-side memory         |      —      |
+| `TodoWrite`    | keep a checklist for multi-step work       |      —      |
 | `Bash`         | run a shell command in the project         |     yes     |
 | `Write`        | create or overwrite a file                 |     yes     |
 | `Edit`         | replace a string in a file                 |     yes     |
 
-Gated tools consult the session's **permission mode** — `normal`, `auto`, or
-`yolo`:
+Gated tools consult the session's **permission mode** — `normal`, `auto`,
+`plan`, or `yolo`:
 
 | Mode     | Behavior                                                  |
 | -------- | --------------------------------------------------------- |
 | `normal` | every gated call asks first (the default)                  |
 | `auto`   | `Write`/`Edit` run without asking; `Bash` still asks       |
+| `plan`   | read-only: the agent can look around and plan, but edits and commands are refused (read-only `git`/`ls` still run) |
 | `yolo`   | everything runs without asking (`--yolo`, `/permissions yolo`) |
 
-Switch with `/permissions [normal|auto|yolo]` (TAB completes the word), press
-`Tab` on an empty prompt to cycle `normal → auto → yolo → normal`, or use
-`--yolo` up front. The prompt shows where you are: `❯` normal, `⏵❯` auto,
-`⏵⏵❯` yolo. When a call does ask, one keypress answers — `y` allow, `a`
-allow this tool for the session, `n` deny, `x` never this session; Enter
-allows, Ctrl-C aborts. A session rule (always/never) survives mode switches.
-Files must be read before they can be edited, so the model can't
-blind-overwrite work it has never seen.
+Switch with `/permissions [normal|auto|plan|yolo]` (TAB completes the word),
+press `Tab` on an empty prompt to cycle `normal → auto → plan → normal` (Tab
+never enters `yolo` — that takes `/permissions yolo` or `--yolo`), or use
+`--permission-mode` up front. The prompt shows where you are: `❯` normal,
+`⏵❯` auto, `⏸❯` plan, `⏵⏵❯` yolo.
+
+**Answering a prompt** takes one keypress: `y` allow (Enter too), `n` deny —
+then an optional one-line reason, which the model receives with the refusal
+("use the helper in util.go instead") — `a` always allow *this kind of call*
+for the session, `p` always allow it in this project, `x` never this session,
+Ctrl-C aborts. "This kind of call" is precise: for `Bash` it is the command
+prefix (`Bash(go test:*)`, not "every command"); a compound command
+(`cd x && make`) has no honest single prefix, so `a`/`p` are not offered for it.
+
+**Permission rules** make those answers durable and scriptable. A rule is
+`Tool` or `Tool(pattern)`:
+
+```
+Bash(go test:*)     any command starting with "go test" (at a word boundary)
+Bash(git status)    exactly that command
+Edit(docs/**)       edits to files under docs/
+Write               every Write
+```
+
+A chained command (`a && b; c | d`) is allowed only if *every* part is allowed,
+and anything with command substitution or redirection (`$(…)`, backticks, `<`,
+`>` other than `2>&1` and `/dev/null`) is never covered by an allow rule.
+Rules come from `--allowed-tools` / `--disallowed-tools`, from your `p` answers
+(stored per project in `~/.config/tlith/tlc.json`, never in the repository),
+and from `.tlc/settings.json` in the repo:
+
+```json
+{ "permissions": { "deny": ["Bash(git push:*)", "Edit(migrations/**)"] } }
+```
+
+A repository can **forbid** things for everyone who works on it but can never
+grant itself permissions: `allow` rules in that file are ignored (and
+reported). Deny rules beat everything, even `--yolo`. A few read-only commands
+(`git status|diff|log|show|rev-parse|ls-files`, `ls`, `pwd`, `which`, `cd`) never
+ask; `cat` and `find` are deliberately not among them.
+
+Files must be read before they can be edited — and re-read if they changed on
+disk since — so the model can't blind-overwrite work it has never seen or
+clobber your concurrent edits. Edits keep a file's line endings (CRLF stays
+CRLF) and are written atomically.
+
+**The workspace boundary.** `Read`, `Glob`, `Grep`, `Write` and `Edit` work
+freely inside the directory you started `tlc` in. Touching anything outside it
+(`../x`, `/etc/…`, `~/…`, or a symlink that leads out) asks first, in every
+mode except `yolo`, and `auto` mode does not wave such edits through. Credential
+stores — `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, cloud/registry tokens, and
+tlc's own `~/.config/tlith` (your API key) — are blocked outright for these
+tools, even in `yolo`. (`Bash` can still run any command you approve, so read
+what it asks to run.)
+
+## Project instructions
+
+`tlc` loads the nearest `TLC.md`, `AGENTS.md` or `CLAUDE.md` (searched from the
+directory you start in up to the git root, in that order) into the agent's
+system prompt, plus your personal `~/.config/tlith/TLC.md`. It prints which
+file it loaded. Each file is capped (4 KB; `TLC_INSTRUCTIONS_MAX`, `0` turns
+loading off) because the prompt shares the server's context budget — keep them
+terse. Run `/init` and the agent writes a first `TLC.md` for the repository
+from what is actually in it. Instruction files are repository content: they
+guide conventions and commands but can never override the safety rules or the
+permission system.
 
 ## Install
 
@@ -95,11 +155,16 @@ go run ./cmd/tlc
 ## Configure
 
 ```sh
-tlc configure --base-url http://turnlith.com --api-key sk-…
+tlc configure --base-url https://turnlith.com
 ```
 
-`tlc configure` verifies the server's health endpoint and your key before
-saving. The connection lives in `~/.config/tlith/config.json` (mode 600) —
+`tlc configure` asks for the key without echoing it, verifies the server's
+health endpoint and the key, and only then saves. For scripts, pipe the key in
+(`echo "$KEY" | tlc configure --base-url … --api-key-stdin`) instead of using
+`--api-key`, which other users on the machine can see in the process list. The
+server URL must be `https://`; plain `http://` is accepted only for
+`localhost`/loopback unless you set `TLC_ALLOW_INSECURE=1` for a network you
+trust. The connection lives in `~/.config/tlith/config.json` (mode 600) —
 the same path the retired `tlith` setup helper used, so existing setups keep
 working; one file now serves everything. Chatting needs an **agent-role**
 key; creating agents or switching a model/effort needs an **admin-role** key
@@ -168,10 +233,14 @@ tlc agents create --name bug-hunter --label "Bug hunter" \
 
 | Flag              | Meaning                                                     |
 | ----------------- | ----------------------------------------------------------- |
-| `-p, --print`     | non-interactive; assistant text on stdout, everything else on stderr |
+| `-p, --print`     | non-interactive; assistant text on stdout, everything else on stderr. Exit status `0` ok, `1` the run failed, `130` interrupted. Piped stdin is appended to the prompt: `git diff \| tlc -p "review this"` |
 | `-c, --continue`  | replay the previous local transcript for this directory     |
 | `--agent <name>`  | agent codename (default: last used, or the only agent)      |
 | `--yolo`          | run gated tools without prompting                            |
+| `--permission-mode <m>` | `normal`, `auto`, `plan` or `yolo`                     |
+| `--allowed-tools <rules>` / `--disallowed-tools <rules>` | comma-separated permission rules, e.g. `"Bash(go test:*),Edit(docs/**)"` |
+| `--max-turns <n>` | `-p`: stop after n model turns (exit 1 if the task is unfinished) |
+| `--output-format <f>` | `-p`: `text` (default), `json` (one result object: `result`, `is_error`, `turns`, `usage`, …) or `stream-json` (one event per line: `text`, `tool_use`, `tool_result`, then `result`) |
 | `--verbose`       | show token usage after each turn                             |
 | `--base-url`, `--api-key` | connection overrides for this run                   |
 
@@ -188,14 +257,23 @@ like `node_modules` are skipped) with the files this session has read,
 written, or edited pinned on top; picking one pre-fills the prompt with its
 `@mention`. Mentions work in one-shot mode too: `tlc -p "explain @main.go"`.
 
-In the REPL: `/help`, `/clear`, `/files`, `/agent [name|new]`, `/agents`,
-`/model [spec] [effort]`, `/effort [level]`, `/status`, `/permissions
-[normal|auto|yolo]`, `/verbose`, `/yolo`, `/exit`; typing `/` prints the
+In the REPL: `/help`, `/clear`, `/init`, `/undo`, `/diff`, `/copy`, `/resume`, `/doctor`,
+`/edit`, `/files`, `/agent [name|new]`, `/agents`, `/model [spec] [effort]`,
+`/effort [level]`, `/status`, `/permissions [normal|auto|plan|yolo]`, `/verbose`,
+`/yolo`, `/exit`; typing `/` prints the
 command menu and `TAB` completes commands, their arguments (agent codenames,
 model ids, effort levels, permission modes), and `@file` mentions. `/model`
 and `/effort` persist on the agent server-side, so the change applies to
 every client of that agent. `Ctrl-C` interrupts the run in progress; another
 `Ctrl-C` at an empty prompt quits.
+
+**Resilience.** Requests the server rejected before doing any work (HTTP 429,
+502, 503, or a refused connection) are retried three times with backoff,
+honoring `Retry-After`, and the retry is announced. Nothing is re-sent once
+output has started, and a stream that ends before the model finished is
+reported as an error instead of being treated as an answer. A stream that goes
+silent is abandoned after 5 minutes (`TLC_STREAM_IDLE_TIMEOUT`, e.g. `15m`;
+`0` disables). Long `Bash` output keeps both its beginning and its end.
 
 Local transcripts (display-only — the real memory is on the server) are
 JSONL files under `~/.local/share/tlith/tlc/sessions/`, one per session, so
@@ -205,8 +283,10 @@ JSONL files under `~/.local/share/tlith/tlc/sessions/`, one per session, so
 
 ```sh
 make build     # bin/tlc
+make check     # what CI runs: gofmt, vet, race tests, cross-platform vet, go mod tidy
 make test      # unit + end-to-end tests against a mock server (no network)
-make vet
+make race      # the same with the race detector
+make cross     # vet the windows/arm64/darwin targets
 make fmt
 ```
 
@@ -215,13 +295,40 @@ The test suite includes `internal/cli/cli_test.go`, which drives the real
 streamed `/v1/chat/completions`, `/v1/mcp`), covering the tool round trip,
 permission denials, `--yolo`, MCP memory search, and error mapping.
 
+**Working with the agent's changes.** Edits and writes show up as numbered,
+colored diffs in the transcript, and the permission prompt shows the same diff
+*before* you answer; an edit that cannot apply (text not found, file never
+read) goes straight back to the model instead of asking you. `/diff` shows what
+the session changed (via git, including new files), `/undo` reverts the last
+change (repeatable; it refuses if you edited the file since, unless you say
+`/undo force`, and the agent is told so it re-reads the file), and `/copy` puts
+the last answer on the clipboard (system tools, or OSC 52 over ssh).
+
+**Sessions.** `/resume` lists earlier sessions in this directory and continues
+one (switching to the agent it was with, since memory is per agent); `-c`
+continues the latest one, preferring the current agent. Long prompts: end a line
+with `\` to continue on the next, or run `/edit` to write the prompt in
+`$VISUAL`/`$EDITOR`. Every prompt ends with a dim cost line
+(`· 4.2k context · 87 out · 2 turns · 6.3s`).
+
+**When something is wrong.** `tlc doctor` (or `/doctor`) checks the saved
+connection, TLS/URL safety, server health, the key, the agent and whether its
+provider has credentials server-side, then the terminal, shell, git, ripgrep,
+file permissions and the project instructions it would load — with a fix for
+each problem. `tlc completion bash|zsh|fish` prints a completion script
+generated from the real flags; `tlc <command> --help` shows per-command help.
+
+Independent read-only tool calls from one model turn (`Read`, `Glob`, `Grep`,
+`SearchMemory`) run in parallel; anything that changes state, or asks, runs one
+at a time in the order requested.
+
 ### Layout
 
 ```
 cmd/tlc/            entry point
 internal/api/       facade SSE client, MCP client, wire types
 internal/agent/     tool loop + system prompt
-internal/tools/     Read, Write, Edit, Bash, Glob, Grep, SearchMemory
+internal/tools/     Read, Write, Edit, Bash, Glob, Grep, SearchMemory, TodoWrite
 internal/permissions/  gated-tool approval policy
 internal/ui/        theme, streaming markdown renderer, readline REPL
 internal/cli/       argument handling, REPL, print mode, install/uninstall
@@ -229,6 +336,14 @@ internal/harness/   opencode wiring (JSONC-aware config merge)
 internal/history/   local JSONL transcripts
 internal/config/    connection file + tlc preferences
 ```
+
+## More documentation
+
+- [docs/architecture.md](docs/architecture.md) — how a prompt flows, how a tool call is decided, where state lives
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, conventions, how to add a tool, command or flag
+- [SECURITY.md](SECURITY.md) — what `tlc` protects, what it does not, how to report a problem
+- [CHANGELOG.md](CHANGELOG.md) — what changed in each release
+- [docs/server-session-scoping.md](docs/server-session-scoping.md) — proposal: per-project conversations on the server
 
 ## License
 

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
 	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
@@ -80,7 +79,7 @@ func TestRunToolRoundTrip(t *testing.T) {
 	err := runner.Run(context.Background(), "read hello.txt", Events{
 		OnText:      func(d string) { text.WriteString(d) },
 		OnToolStart: func(name, raw string) { events = append(events, "start:"+name) },
-		OnToolEnd:   func(name, result string, denied bool, _ time.Duration) { events = append(events, "end:"+name) },
+		OnToolEnd:   func(o ToolOutcome) { events = append(events, "end:"+o.Name) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +150,7 @@ func TestRunDeniedToolFeedsModel(t *testing.T) {
 
 	denied := false
 	err := runner.Run(context.Background(), "clean up", Events{
-		OnToolEnd: func(name, result string, wasDenied bool, _ time.Duration) { denied = wasDenied },
+		OnToolEnd: func(o ToolOutcome) { denied = o.Denied },
 	})
 	if err != nil {
 		t.Fatal(err)

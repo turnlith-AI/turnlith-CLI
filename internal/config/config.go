@@ -7,7 +7,10 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +20,9 @@ const (
 	EnvBaseURL = "TLITH_BASE_URL"
 	EnvAPIKey  = "TLITH_API_KEY"
 	EnvAgent   = "TLC_AGENT"
+	// EnvAllowInsecure=1 permits plain http to a non-loopback server, for
+	// networks the operator trusts (a VPN, a private LAN).
+	EnvAllowInsecure = "TLC_ALLOW_INSECURE"
 )
 
 // Connection is the server + credential pair.
@@ -28,6 +34,9 @@ type Connection struct {
 // Prefs are tlc-local preferences.
 type Prefs struct {
 	DefaultAgent string `json:"defaultAgent,omitempty"`
+	// Projects holds per-project choices, keyed by the project's canonical
+	// root directory (see ProjectPrefs).
+	Projects map[string]ProjectPrefs `json:"projects,omitempty"`
 }
 
 // ErrNotConfigured reports a missing connection with setup guidance.
@@ -84,12 +93,57 @@ func NormalizeBaseURL(raw string) string {
 			host = host[:i]
 		}
 		scheme := "https"
-		if strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1") || strings.HasPrefix(host, "[::1]") {
+		if isLoopbackHost(hostOnly(host)) {
 			scheme = "http"
 		}
 		url = scheme + "://" + url
 	}
 	return url
+}
+
+// hostOnly strips an optional port (and IPv6 brackets) from a host[:port].
+func hostOnly(hostport string) string {
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
+	}
+	return strings.Trim(hostport, "[]")
+}
+
+// isLoopbackHost reports whether host names this machine: localhost (or any
+// *.localhost) or a loopback address. "localhost.example.com" is not.
+func isLoopbackHost(host string) bool {
+	host = strings.ToLower(host)
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// ValidateBaseURL refuses server URLs that would put the api key at risk:
+// anything but http(s), and plain http to a host other than this machine
+// unless TLC_ALLOW_INSECURE=1. Errors name the host only, never userinfo or
+// query strings.
+func ValidateBaseURL(raw string) error {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return errors.New("invalid server URL: expected something like https://turnlith.com")
+	}
+	if u.Host == "" {
+		return errors.New("invalid server URL: missing host (expected something like https://turnlith.com)")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if isLoopbackHost(host) || os.Getenv(EnvAllowInsecure) == "1" {
+			return nil
+		}
+		return fmt.Errorf("refusing to send the api key over plain http to %s — use https://, or set %s=1 if this network is trusted", host, EnvAllowInsecure)
+	default:
+		return fmt.Errorf("unsupported server URL scheme %q — use https://", u.Scheme)
+	}
 }
 
 // LoadConnection resolves the connection: environment first, then the shared

@@ -78,8 +78,8 @@ func TestStylerBoldTogglesWithEscapes(t *testing.T) {
 
 func TestStylerSingleStarPassesThrough(t *testing.T) {
 	s := NewStyler(plain())
-	out := s.Write("* bullet\n") + s.Flush()
-	if out != "* bullet\n" {
+	out := s.Write("2 * 3 and *.go files\n") + s.Flush()
+	if out != "2 * 3 and *.go files\n" {
 		t.Fatalf("got %q", out)
 	}
 }

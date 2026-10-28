@@ -31,6 +31,10 @@ type REPL struct {
 	// codenames, model ids, effort levels, @file mentions); nil completes
 	// command names only.
 	candidates func(before, prefix string) []string
+	// feedback is the reason typed after the latest denied prompt (see
+	// TakeFeedback); modePrompt is the prompt to restore after a temporary one.
+	feedback   string
+	modePrompt string
 	// onTabEmpty runs when Tab is pressed on an empty line (readline has no
 	// candidates then, so Tab is free); the app cycles the permission mode.
 	onTabEmpty func()
@@ -44,7 +48,8 @@ func (r *REPL) SetOnTabEmpty(fn func()) { r.onTabEmpty = fn }
 
 // SetPermissionMode restyles the input prompt to reflect the mode.
 func (r *REPL) SetPermissionMode(mode permissions.Mode) {
-	r.rl.SetPrompt(PromptForMode(r.theme, mode))
+	r.modePrompt = PromptForMode(r.theme, mode)
+	r.rl.SetPrompt(r.modePrompt)
 }
 
 // WriteAbove prints text above the input line; it goes through readline's
@@ -64,11 +69,14 @@ func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 	// while reading a line, after NewEx returned, so the late assignment is safe.
 	var instance *readline.Instance
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          PromptForMode(theme, permissions.ModeAsk),
-		HistoryFile:     filepath.Join(config.StateDir(), "history"),
-		HistoryLimit:    1000,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
+		Prompt: PromptForMode(theme, permissions.ModeAsk),
+		// history is saved by hand in Readline so private answers (a denial
+		// reason) stay out of the up-arrow history
+		DisableAutoSaveHistory: true,
+		HistoryFile:            filepath.Join(config.StateDir(), "history"),
+		HistoryLimit:           1000,
+		InterruptPrompt:        "^C",
+		EOFPrompt:              "exit",
 		AutoComplete: completer{extra: func(before, prefix string) []string {
 			if r.candidates == nil {
 				return nil
@@ -100,6 +108,7 @@ func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 		return nil, err
 	}
 	r.rl = rl
+	r.modePrompt = PromptForMode(theme, permissions.ModeAsk)
 	instance = rl
 	return r, nil
 }
@@ -110,8 +119,19 @@ var ErrInterrupt = readline.ErrInterrupt
 // Readline reads one input line; ErrInterrupt on Ctrl-C, io.EOF on Ctrl-D.
 func (r *REPL) Readline() (string, error) {
 	line, err := r.rl.Readline()
+	if err == nil && strings.TrimSpace(line) != "" {
+		_ = r.rl.SaveToHistory(line) // single-line form, placeholders intact
+	}
 	line = strings.ReplaceAll(line, string(newlinePlaceholder), "\n")
 	return line, err
+}
+
+// ReadlineWithPrompt reads one line under a temporary prompt (a continuation
+// marker), then restores the mode prompt.
+func (r *REPL) ReadlineWithPrompt(prompt string) (string, error) {
+	r.rl.SetPrompt(prompt)
+	defer r.rl.SetPrompt(r.modePrompt)
+	return r.Readline()
 }
 
 // ReadSecret reads a hidden value (api key entry).
@@ -126,10 +146,21 @@ func (r *REPL) ReadSecret(prompt string) (string, error) {
 func (r *REPL) Close() { _ = r.rl.Close() }
 
 // Prompt implements permissions.Prompter for gated tool calls. One keypress
-// answers — no Enter: y allow · a always · n deny · x never; Enter allows,
-// Ctrl-C aborts. Platforms without a raw-mode stdin fall back to typing.
+// answers — no Enter: y allow · a always · p always in this project · n deny ·
+// x never; Enter allows, Ctrl-C aborts. a/p/x are only live when there is an
+// honest rule to remember. Platforms without a raw-mode stdin fall back to
+// typing.
 func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
-	r.renderer.PermissionBlock(req.Tool, req.Summary, req.Preview)
+	view := PermissionView{Tool: req.Tool, Summary: req.Summary, Preview: req.Preview, Note: req.Reason}
+	if rule := permissions.SuggestRule(req); rule != nil {
+		view.Remember, view.Project, view.Rule = true, true, rule.String()
+		if rule.Pattern == "" {
+			view.Rule = rule.Tool + " (any " + strings.ToLower(rule.Tool) + ")"
+		}
+	} else if req.External {
+		view.Remember = true
+	}
+	r.renderer.PermissionBlock(view)
 	for {
 		if key, ok := readSingleKey(); ok {
 			switch key {
@@ -137,14 +168,24 @@ func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
 				r.echoAnswer("y allow")
 				return permissions.AllowOnce, nil
 			case "a":
-				r.echoAnswer("a always this session")
-				return permissions.AllowAlways, nil
+				if view.Remember {
+					r.echoAnswer("a always (this session)")
+					return permissions.AllowAlways, nil
+				}
+			case "p":
+				if view.Project {
+					r.echoAnswer("p always in this project")
+					return permissions.AllowProject, nil
+				}
 			case "n", "esc":
 				r.echoAnswer("n deny")
+				r.askReason()
 				return permissions.Deny, nil
 			case "x":
-				r.echoAnswer("x never this session")
-				return permissions.DenyAlways, nil
+				if view.Remember {
+					r.echoAnswer("x never (this session)")
+					return permissions.DenyAlways, nil
+				}
 			case "ctrlC":
 				r.echoAnswer("^C")
 				return permissions.Deny, permissions.ErrAborted
@@ -163,15 +204,45 @@ func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
 		case "", "y", "yes":
 			return permissions.AllowOnce, nil
 		case "a", "always":
-			return permissions.AllowAlways, nil
+			if view.Remember {
+				return permissions.AllowAlways, nil
+			}
+		case "p", "project":
+			if view.Project {
+				return permissions.AllowProject, nil
+			}
 		case "n", "no":
+			r.askReason()
 			return permissions.Deny, nil
 		case "x", "never":
-			return permissions.DenyAlways, nil
-		default:
-			r.renderer.Infof("%s", r.theme.Dim("please answer y, a, n, or x"))
+			if view.Remember {
+				return permissions.DenyAlways, nil
+			}
 		}
+		r.renderer.Infof("%s", r.theme.Dim("please answer with one of the letters shown"))
 	}
+}
+
+// askReason offers a one-line explanation after a denial; the model gets it
+// with the refusal ("use the helper in util.go instead"). Enter skips it, and
+// the text never enters the input history.
+func (r *REPL) askReason() {
+	r.feedback = ""
+	r.rl.SetPrompt("  " + r.theme.Dim("why not? (optional, Enter to skip) › "))
+	line, err := r.rl.Readline()
+	r.rl.SetPrompt(r.modePrompt)
+	if err != nil {
+		return // Ctrl-C or EOF: no reason, the denial stands
+	}
+	r.feedback = strings.TrimSpace(strings.ReplaceAll(line, string(newlinePlaceholder), " "))
+}
+
+// TakeFeedback implements permissions.FeedbackTaker: the reason typed for the
+// most recent denial, cleared once read.
+func (r *REPL) TakeFeedback() string {
+	s := r.feedback
+	r.feedback = ""
+	return s
 }
 
 // echoAnswer shows the chosen answer under the permission block (raw mode

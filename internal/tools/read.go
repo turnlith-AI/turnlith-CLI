@@ -33,6 +33,31 @@ func (t *ReadTool) Schema() json.RawMessage {
 
 func (t *ReadTool) Gated() bool { return false }
 
+// NeedsPermission asks before touching files outside the working directory.
+func (t *ReadTool) NeedsPermission(raw json.RawMessage) (string, bool) {
+	var args struct {
+		FilePath string `json:"file_path"`
+	}
+	if decodeArgs(raw, &args) != nil {
+		return "", false
+	}
+	return outsideWorkspace(t.Root, args.FilePath)
+}
+
+// Prepare implements Preparer: a credential path is refused before the user
+// is ever asked about reading it.
+func (t *ReadTool) Prepare(raw json.RawMessage) (string, error) {
+	var args readArgs
+	if err := decodeArgs(raw, &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+	_, err := resolvePath(t.Root, args.FilePath)
+	return "", err
+}
+
+// ConcurrencySafe: read-only and stateless, so calls may overlap.
+func (t *ReadTool) ConcurrencySafe() bool { return true }
+
 func (t *ReadTool) Category() string { return permissions.CategoryRead }
 
 const (

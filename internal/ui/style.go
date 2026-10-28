@@ -22,7 +22,16 @@ type Styler struct {
 	inline      bool
 	bold        bool
 	starHold    int
+	lineStyle   lineStyle // heading or quote styling for the rest of the line
 }
+
+type lineStyle int
+
+const (
+	styleNone lineStyle = iota
+	styleHeading
+	styleQuote
+)
 
 type styleMode int
 
@@ -58,8 +67,7 @@ func (s *Styler) Flush() string {
 			s.lineBuf = s.lineBuf[:0]
 		}
 	} else if len(s.held) > 0 {
-		out.Write(s.held)
-		s.held = s.held[:0]
+		s.flushHeld(&out)
 		s.lineStart = false
 	}
 	if s.bold {
@@ -67,6 +75,7 @@ func (s *Styler) Flush() string {
 	}
 	s.inline = false
 	s.bold = false
+	s.lineStyle = styleNone
 	return out.String()
 }
 
@@ -80,6 +89,7 @@ func (s *Styler) Reset() {
 	s.inline = false
 	s.bold = false
 	s.starHold = 0
+	s.lineStyle = styleNone
 }
 
 func (s *Styler) step(r rune, out *strings.Builder) {
@@ -98,13 +108,24 @@ func (s *Styler) step(r rune, out *strings.Builder) {
 	s.inlineStep(r, out)
 }
 
-// lineStartStep decides whether the line opens a code fence. It holds back
-// leading spaces and up to two backticks; anything else flushes and streams.
+// lineStartStep decides what the line is before any of it is shown: a code
+// fence (```), a heading (# … ######), a bullet (- * +), a quote (>), or plain
+// text. It holds back only the possible marker — leading spaces plus up to six
+// marker characters — and decides on the next character; anything else
+// flushes the held text and streams normally.
 func (s *Styler) lineStartStep(r rune, out *strings.Builder) {
+	indent := 0
+	for indent < len(s.held) && s.held[indent] == ' ' {
+		indent++
+	}
+	marker := s.held[indent:]
 	switch {
-	case r == '`':
+	case r == ' ' && len(marker) == 0 && indent < 8:
+		s.held = append(s.held, ' ')
+		return
+	case r == '`' && allBytes(marker, '`') && len(marker) < 3:
 		s.held = append(s.held, '`')
-		if len(s.held) == 3 {
+		if len(marker)+1 == 3 {
 			out.WriteString(s.theme.Dim(string(s.held)))
 			s.held = s.held[:0]
 			s.mode = modeFence
@@ -112,17 +133,59 @@ func (s *Styler) lineStartStep(r rune, out *strings.Builder) {
 			s.lineStart = false
 		}
 		return
-	case r == ' ' && len(s.held) < 8:
-		s.held = append(s.held, ' ')
+	case r == '#' && allBytes(marker, '#') && len(marker) < 6:
+		s.held = append(s.held, '#')
 		return
-	default:
-		if len(s.held) > 0 {
-			out.Write(s.held)
-			s.held = s.held[:0]
-		}
+	case len(marker) == 0 && (r == '-' || r == '*' || r == '+' || r == '>'):
+		s.held = append(s.held, byte(r))
+		return
+	case r == ' ' && len(marker) > 0 && allBytes(marker, '#'):
+		// "## Title": the hashes are structure, not text
+		s.held = s.held[:0]
+		s.lineStyle = styleHeading
 		s.lineStart = false
-		s.inlineStep(r, out)
+		return
+	case r == ' ' && len(marker) == 1 && (marker[0] == '-' || marker[0] == '*' || marker[0] == '+'):
+		out.WriteString(strings.Repeat(" ", indent))
+		out.WriteString(s.theme.Accent("•") + " ")
+		s.held = s.held[:0]
+		s.lineStart = false
+		return
+	case r == ' ' && len(marker) == 1 && marker[0] == '>':
+		out.WriteString(s.theme.Dim("▎ "))
+		s.held = s.held[:0]
+		s.lineStyle = styleQuote
+		s.lineStart = false
+		return
 	}
+	s.flushHeld(out)
+	s.lineStart = false
+	s.inlineStep(r, out)
+}
+
+// flushHeld gives up on a held block marker: the indentation is written as is
+// and the marker characters take the inline path, so a leading ` or ** still
+// opens a code span or bold run.
+func (s *Styler) flushHeld(out *strings.Builder) {
+	held := append([]byte(nil), s.held...)
+	s.held = s.held[:0]
+	indent := 0
+	for indent < len(held) && held[indent] == ' ' {
+		indent++
+	}
+	out.Write(held[:indent])
+	for _, b := range held[indent:] {
+		s.inlineStep(rune(b), out)
+	}
+}
+
+func allBytes(b []byte, c byte) bool {
+	for _, x := range b {
+		if x != c {
+			return false
+		}
+	}
+	return true
 }
 
 // fenceStep buffers fence lines wholesale: the opening line's info string is
@@ -151,8 +214,12 @@ func (s *Styler) fenceStep(r rune, out *strings.Builder) {
 }
 
 func (s *Styler) endLine(out *strings.Builder) {
+	if s.lineStart && len(s.held) > 0 {
+		s.flushHeld(out)
+	}
 	s.flushStars(out)
 	s.lineStart = true
+	s.lineStyle = styleNone
 	s.inline = false
 	if s.bold {
 		s.boldOff(out)
@@ -181,6 +248,10 @@ func (s *Styler) inlineStep(r rune, out *strings.Builder) {
 			out.WriteString(s.theme.Code(string(r)))
 		case s.bold:
 			out.WriteString(s.theme.Bold(string(r)))
+		case s.lineStyle == styleHeading:
+			out.WriteString(s.theme.BoldAccent(string(r)))
+		case s.lineStyle == styleQuote:
+			out.WriteString(s.theme.Dim(string(r)))
 		default:
 			out.WriteRune(r)
 		}

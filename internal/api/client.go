@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/version"
@@ -22,6 +26,52 @@ type Client struct {
 
 	userAgent string
 	init      mcpInit
+
+	// retryDelays are the waits before each retry of a request the server
+	// provably did not start processing (see retryable); its length is the
+	// retry budget.
+	retryDelays []time.Duration
+	// idleTimeout aborts a stream that goes silent (a half-open connection
+	// never errors on its own). Zero disables it.
+	idleTimeout time.Duration
+	// OnRetry, when set, is told before each backoff sleep so the UI can say
+	// why the turn is taking a while. attempt counts from 1.
+	OnRetry func(attempt int, wait time.Duration, err error)
+}
+
+// Errors that describe a stream which started but did not finish cleanly.
+var (
+	// ErrTruncatedStream means the connection ended before the model's turn
+	// did: no finish_reason and no [DONE] frame arrived.
+	ErrTruncatedStream = errors.New("the server closed the stream before the turn finished")
+	// ErrStreamStalled means the server stopped sending for longer than the
+	// idle timeout while the connection stayed open.
+	ErrStreamStalled = errors.New("the server stopped responding mid-turn")
+)
+
+const (
+	// maxRetryAfter caps how long a server's Retry-After can park the client.
+	maxRetryAfter = 30 * time.Second
+	// EnvStreamIdleTimeout overrides the idle timeout ("90s", "10m"; "0"
+	// disables). Reasoning models can stay silent for a long time, and the
+	// server sends no heartbeat, so the default is generous.
+	EnvStreamIdleTimeout = "TLC_STREAM_IDLE_TIMEOUT"
+	defaultIdleTimeout   = 5 * time.Minute
+)
+
+// SetRetryDelays replaces the retry schedule (no arguments disables retries).
+func (c *Client) SetRetryDelays(d ...time.Duration) { c.retryDelays = d }
+
+// SetStreamIdleTimeout sets how long a stream may stay silent; zero disables.
+func (c *Client) SetStreamIdleTimeout(d time.Duration) { c.idleTimeout = d }
+
+func idleTimeoutFromEnv() time.Duration {
+	if v := strings.TrimSpace(os.Getenv(EnvStreamIdleTimeout)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return defaultIdleTimeout
 }
 
 // Version is stamped onto requests; the CLI sets it at startup.
@@ -41,7 +91,9 @@ func New(baseURL, apiKey string) *Client {
 				IdleConnTimeout:       90 * time.Second,
 			},
 		},
-		userAgent: "tlc/" + ClientVersion,
+		userAgent:   "tlc/" + ClientVersion,
+		retryDelays: []time.Duration{time.Second, 2 * time.Second, 4 * time.Second},
+		idleTimeout: idleTimeoutFromEnv(),
 	}
 }
 
@@ -150,41 +202,152 @@ type StreamHandlers struct {
 	OnText func(delta string)
 }
 
+// retryable reports whether an HTTP status means the server rejected the
+// request before doing any work, so sending it again cannot duplicate the
+// prompt in the agent's stored history: rate limited, overloaded, or a gateway
+// with nothing behind it. 504 is deliberately absent — the upstream may have
+// started the turn.
+func retryable(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable
+}
+
+// isDialError reports a failure to even connect (refused, unreachable, DNS):
+// no request bytes were sent.
+func isDialError(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
+}
+
+// retryDelay picks the wait before a retry: the server's Retry-After (seconds
+// or an HTTP date, capped) when it sent one, the schedule's delay otherwise.
+func retryDelay(scheduled time.Duration, retryAfter string) time.Duration {
+	retryAfter = strings.TrimSpace(retryAfter)
+	if retryAfter == "" {
+		return scheduled
+	}
+	if secs, err := strconv.Atoi(retryAfter); err == nil && secs >= 0 {
+		return min(time.Duration(secs)*time.Second, maxRetryAfter)
+	}
+	if at, err := http.ParseTime(retryAfter); err == nil {
+		return max(0, min(time.Until(at), maxRetryAfter))
+	}
+	return scheduled
+}
+
+// openStream sends the chat request, retrying failures the server provably did
+// not process. It returns the response with a 2xx status; the caller owns the
+// body.
+func (c *Client) openStream(ctx context.Context, req ChatRequest) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		httpReq, err := c.NewRequest(ctx, http.MethodPost, "/v1/chat/completions", req)
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("accept", "text/event-stream")
+
+		var (
+			lastErr    error
+			retryAfter string
+		)
+		res, err := c.hc.Do(httpReq)
+		switch {
+		case err != nil:
+			if ctx.Err() != nil || !isDialError(err) {
+				return nil, err
+			}
+			lastErr = err
+		case res.StatusCode >= 200 && res.StatusCode <= 299:
+			return res, nil
+		default:
+			apiErr := parseAPIError(res)
+			res.Body.Close()
+			if !retryable(res.StatusCode) {
+				return nil, apiErr
+			}
+			lastErr = apiErr
+			retryAfter = res.Header.Get("Retry-After")
+		}
+
+		if attempt >= len(c.retryDelays) {
+			return nil, lastErr
+		}
+		wait := retryDelay(c.retryDelays[attempt], retryAfter)
+		if c.OnRetry != nil {
+			c.OnRetry(attempt+1, wait, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+// activityReader reports every read so an idle timer can be pushed back.
+type activityReader struct {
+	r        io.Reader
+	activity func()
+}
+
+func (a *activityReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if n > 0 {
+		a.activity()
+	}
+	return n, err
+}
+
 // StreamChat runs one streamed turn. It returns once the model finished the
 // turn (text and/or tool calls); the caller executes calls and, if any, calls
-// again with the replayed message history.
+// again with the replayed message history. Failures before the stream opens
+// that the server did not process are retried with backoff; once output has
+// started nothing is retried (it could duplicate text or tool calls), and a
+// stream that ends without a finish_reason or [DONE] is ErrTruncatedStream.
 func (c *Client) StreamChat(ctx context.Context, req ChatRequest, h StreamHandlers) (TurnResult, error) {
 	req.Stream = true
-	httpReq, err := c.NewRequest(ctx, http.MethodPost, "/v1/chat/completions", req)
-	if err != nil {
-		return TurnResult{}, err
-	}
-	httpReq.Header.Set("accept", "text/event-stream")
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	res, err := c.hc.Do(httpReq)
+	res, err := c.openStream(ctx, req)
 	if err != nil {
 		return TurnResult{}, err
 	}
 	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return TurnResult{}, parseAPIError(res)
+
+	var stalled atomic.Bool
+	var body io.Reader = res.Body
+	if c.idleTimeout > 0 {
+		timer := time.AfterFunc(c.idleTimeout, func() {
+			stalled.Store(true)
+			cancel()
+		})
+		defer timer.Stop()
+		body = &activityReader{r: res.Body, activity: func() { timer.Reset(c.idleTimeout) }}
 	}
 
 	var (
 		result    TurnResult
 		callOrder []int
 		calls     = map[int]*ToolCall{}
+		finished  bool // a finish_reason or [DONE] arrived
 	)
-	sse := NewSSEReader(res.Body)
+	sse := NewSSEReader(body)
 	for {
 		payload, err := sse.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			if stalled.Load() {
+				return result, ErrStreamStalled
+			}
+			if ctx.Err() != nil {
+				return result, ctx.Err()
+			}
 			return result, err
 		}
 		if payload == "[DONE]" {
+			finished = true
 			break
 		}
 		var chunk streamChunk
@@ -219,11 +382,18 @@ func (c *Client) StreamChat(ctx context.Context, req ChatRequest, h StreamHandle
 			}
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
 				result.FinishReason = *choice.FinishReason
+				finished = true
 			}
 		}
 		if chunk.Usage != nil {
 			result.Usage = *chunk.Usage
 		}
+	}
+	if stalled.Load() {
+		return result, ErrStreamStalled
+	}
+	if !finished {
+		return result, ErrTruncatedStream
 	}
 	for _, idx := range callOrder {
 		result.ToolCalls = append(result.ToolCalls, *calls[idx])

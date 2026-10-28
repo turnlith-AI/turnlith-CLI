@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
@@ -33,6 +34,17 @@ func (t *WriteTool) Schema() json.RawMessage {
 
 func (t *WriteTool) Gated() bool { return true }
 
+// NeedsPermission asks before touching files outside the working directory.
+func (t *WriteTool) NeedsPermission(raw json.RawMessage) (string, bool) {
+	var args struct {
+		FilePath string `json:"file_path"`
+	}
+	if decodeArgs(raw, &args) != nil {
+		return "", false
+	}
+	return outsideWorkspace(t.Root, args.FilePath)
+}
+
 func (t *WriteTool) Category() string { return permissions.CategoryEdit }
 
 type writeArgs struct {
@@ -40,33 +52,100 @@ type writeArgs struct {
 	Content  string `json:"content"`
 }
 
-func (t *WriteTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+// writePlan is a validated write, ready to apply.
+type writePlan struct {
+	path    string
+	mode    os.FileMode
+	orig    []byte // previous bytes (nil for a new file)
+	out     []byte
+	before  string // LF-normalized previous text ("" for a new file)
+	after   string
+	created bool
+	lines   int
+	bytes   int
+}
+
+func (t *WriteTool) plan(raw json.RawMessage) (*writePlan, error) {
 	var args writeArgs
 	if err := decodeArgs(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 	path, err := resolvePath(t.Root, args.FilePath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	mode := os.FileMode(0o644)
+	p := &writePlan{path: path, mode: 0o644, created: true, after: args.Content, lines: lineCount(args.Content), bytes: len(args.Content)}
+	content := args.Content
 	if info, err := os.Stat(path); err == nil {
 		if info.IsDir() {
-			return "", fmt.Errorf("%s is a directory", path)
+			return nil, fmt.Errorf("%s is a directory", path)
 		}
 		if !t.Tracker.WasRead(path) {
-			return "", fmt.Errorf("%s already exists and has not been read in this session — read it first, or use Edit for targeted changes", path)
+			return nil, fmt.Errorf("%s already exists and has not been read in this session — read it first, or use Edit for targeted changes", path)
 		}
-		mode = info.Mode().Perm()
+		if t.Tracker.Stale(path) {
+			return nil, fmt.Errorf("%s has changed on disk since it was read — read it again before overwriting it", path)
+		}
+		p.created = false
+		p.mode = info.Mode().Perm()
+		if existing, err := os.ReadFile(path); err == nil {
+			p.orig = existing
+			p.before = toLF(string(existing))
+			// keep a CRLF file CRLF: the model only ever saw it with plain newlines
+			if isPureCRLF(string(existing)) && !strings.Contains(content, "\r") {
+				content = toCRLF(content)
+			}
+		}
 	}
+	p.out = []byte(content)
+	return p, nil
+}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", fmt.Errorf("cannot create parent directories for %s: %w", path, err)
+// Prepare implements Preparer: validate the write and preview it — a diff for
+// an overwrite, the first lines for a new file.
+func (t *WriteTool) Prepare(raw json.RawMessage) (string, error) {
+	p, err := t.plan(raw)
+	if err != nil {
+		return "", err
 	}
-	if err := os.WriteFile(path, []byte(args.Content), mode); err != nil {
-		return "", fmt.Errorf("cannot write %s: %w", path, err)
+	if p.created {
+		preview, _, _ := Diff("", p.after, 0, 12)
+		return preview, nil
 	}
-	t.Tracker.MarkWritten(path)
-	return fmt.Sprintf("Wrote %d lines (%d bytes) to %s", lineCount(args.Content), len(args.Content), path), nil
+	diff, _, _ := Diff(p.before, p.after, 2, 14)
+	return diff, nil
+}
+
+func (t *WriteTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+	res, err := t.RunResult(ctx, raw)
+	return res.Text, err
+}
+
+// RunResult writes the file; the model gets a confirmation, the user a
+// description of what changed.
+func (t *WriteTool) RunResult(_ context.Context, raw json.RawMessage) (Result, error) {
+	p, err := t.plan(raw)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(p.path), 0o755); err != nil {
+		return Result{}, fmt.Errorf("cannot create parent directories for %s: %w", p.path, err)
+	}
+	if err := writeFileAtomic(p.path, p.out, p.mode); err != nil {
+		return Result{}, fmt.Errorf("cannot write %s: %w", p.path, err)
+	}
+	t.Tracker.recordChange(p.path, !p.created, p.orig, p.mode, p.out)
+	t.Tracker.MarkWritten(p.path)
+	display := changeDisplay(p.before, p.after)
+	if p.created {
+		preview, _, _ := Diff("", p.after, 0, 12)
+		display = fmt.Sprintf("Created new file (%s)", plural(p.lines, "line"))
+		if preview != "" {
+			display += "\n" + preview
+		}
+	}
+	return Result{
+		Text:    fmt.Sprintf("Wrote %d lines (%d bytes) to %s", p.lines, p.bytes, p.path),
+		Display: display,
+	}, nil
 }

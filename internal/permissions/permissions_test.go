@@ -89,6 +89,9 @@ func TestParseMode(t *testing.T) {
 		{"YOLO", ModeYolo, true},
 		{" no ", ModeAsk, true},
 		{"y", ModeYolo, true},
+		{"plan", ModePlan, true},
+		{"pl", ModePlan, true},
+		{"p", ModePlan, true},
 		{"au", ModeAuto, true},
 		{"a", ModeAsk, false}, // ambiguous: ask/auto
 		{"", ModeAsk, false},
@@ -103,13 +106,16 @@ func TestParseMode(t *testing.T) {
 }
 
 func TestNextModeCycles(t *testing.T) {
-	if NextMode(ModeAsk) != ModeAuto || NextMode(ModeAuto) != ModeYolo || NextMode(ModeYolo) != ModeAsk {
-		t.Fatal("cycle order must be normal → auto → yolo → normal")
+	order := []Mode{ModeAsk, ModeAuto, ModePlan, ModeYolo, ModeAsk}
+	for i := 0; i+1 < len(order); i++ {
+		if got := NextMode(order[i]); got != order[i+1] {
+			t.Fatalf("NextMode(%v) = %v, want %v (normal → auto → plan → yolo → normal)", order[i], got, order[i+1])
+		}
 	}
 }
 
 func TestModeStrings(t *testing.T) {
-	if ModeAsk.String() != "normal" || ModeAuto.String() != "auto" || ModeYolo.String() != "yolo" {
+	if ModeAsk.String() != "normal" || ModeAuto.String() != "auto" || ModePlan.String() != "plan" || ModeYolo.String() != "yolo" {
 		t.Fatal("mode names must be stable: they are user-facing words")
 	}
 }
@@ -118,7 +124,8 @@ func TestAlwaysRemembers(t *testing.T) {
 	p := queuePrompter{answers: []Decision{AllowAlways}}
 	policy := &Policy{Prompter: &p}
 	for i := 0; i < 3; i++ {
-		ok, err := policy.Approve(context.Background(), Request{Tool: "Bash"})
+		// "always" is scoped to the command's prefix (go test), not to Bash as a whole
+		ok, err := policy.Approve(context.Background(), Request{Tool: "Bash", Subject: "go test ./..."})
 		if err != nil || !ok {
 			t.Fatalf("iteration %d: ok=%v err=%v", i, ok, err)
 		}
@@ -160,5 +167,69 @@ func TestNoPrompterDenies(t *testing.T) {
 	ok, err := policy.Approve(context.Background(), Request{Tool: "Bash"})
 	if err != nil || ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+}
+
+func TestExternalRequestsAreNotWavedThroughByAutoMode(t *testing.T) {
+	p := queuePrompter{answers: []Decision{AllowOnce}}
+	policy := &Policy{Mode: ModeAuto, Prompter: &p}
+	ok, _ := policy.Approve(context.Background(), Request{Tool: "Edit", Category: CategoryEdit, External: true, Reason: "outside the working directory: /etc/hosts"})
+	if !ok || p.asked != 1 {
+		t.Fatalf("auto must still ask for edits outside the workspace: ok=%v asked=%d", ok, p.asked)
+	}
+}
+
+func TestAlwaysForATooldoesNotCoverExternalCalls(t *testing.T) {
+	p := queuePrompter{answers: []Decision{AllowAlways, AllowOnce}}
+	policy := &Policy{Mode: ModeAsk, Prompter: &p}
+	ctx := context.Background()
+
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Read", Category: CategoryRead, External: true}); !ok {
+		t.Fatal("first external Read should be allowed")
+	}
+	// "always" was said about outside-workspace reads; the same again is covered
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Read", Category: CategoryRead, External: true}); !ok || p.asked != 1 {
+		t.Fatalf("repeat external Read should be covered by the rule: asked=%d", p.asked)
+	}
+	// but an ordinary gated call of the same tool still asks
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Read", Category: CategoryRead}); !ok || p.asked != 2 {
+		t.Fatalf("a rule for external calls must not cover internal ones: asked=%d", p.asked)
+	}
+}
+
+func TestInternalAlwaysDoesNotCoverExternalCalls(t *testing.T) {
+	p := queuePrompter{answers: []Decision{AllowAlways, Deny}}
+	policy := &Policy{Mode: ModeAsk, Prompter: &p}
+	ctx := context.Background()
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Edit", Category: CategoryEdit}); !ok {
+		t.Fatal("allow-always expected")
+	}
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Edit", Category: CategoryEdit, External: true}); ok || p.asked != 2 {
+		t.Fatalf("an edit rule must not silently cover files outside the workspace: asked=%d", p.asked)
+	}
+}
+
+func TestYoloStillAllowsExternal(t *testing.T) {
+	policy := &Policy{Mode: ModeYolo}
+	if ok, err := policy.Approve(context.Background(), Request{Tool: "Read", External: true}); err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+}
+
+func TestNextSafeModeNeverReachesYolo(t *testing.T) {
+	// Tab on an empty prompt must not be able to switch every prompt off with
+	// a couple of stray keypresses; yolo needs --yolo or /permissions yolo.
+	m := ModeAsk
+	for i := 0; i < 10; i++ {
+		m = NextSafeMode(m)
+		if m == ModeYolo {
+			t.Fatalf("cycle reached yolo after %d presses", i+1)
+		}
+	}
+	if NextSafeMode(ModeAsk) != ModeAuto || NextSafeMode(ModeAuto) != ModePlan || NextSafeMode(ModePlan) != ModeAsk {
+		t.Fatal("the key cycle is normal → auto → plan → normal")
+	}
+	if NextSafeMode(ModeYolo) != ModeAsk {
+		t.Fatal("leaving yolo with Tab should land on the safe default")
 	}
 }

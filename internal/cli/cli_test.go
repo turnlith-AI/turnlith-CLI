@@ -48,6 +48,12 @@ type mockServer struct {
 	catalog   []api.CatalogModel
 	chatFn    func(turn int, body api.ChatRequest) []string
 	mcpText   string
+	// chatFail, when set, may answer a chat request with a plain HTTP error
+	// (non-zero status plus JSON body) instead of a stream.
+	chatFail func(turn int) (status int, body string)
+	// omitDone ends each stream without the terminating [DONE] frame, like a
+	// connection that was cut mid-turn.
+	omitDone bool
 
 	mu       sync.Mutex
 	turns    int
@@ -117,6 +123,14 @@ func newMockServer(t *testing.T, agents []api.Agent, chatFn func(turn int, body 
 			m.chats = append(m.chats, body)
 			m.mu.Unlock()
 
+			if m.chatFail != nil {
+				if status, errBody := m.chatFail(turn); status != 0 {
+					w.Header().Set("content-type", "application/json")
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, errBody)
+					return
+				}
+			}
 			w.Header().Set("content-type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			flusher := w.(http.Flusher)
@@ -124,8 +138,10 @@ func newMockServer(t *testing.T, agents []api.Agent, chatFn func(turn int, body 
 				_, _ = io.WriteString(w, "data: "+payload+"\n\n")
 				flusher.Flush()
 			}
-			_, _ = io.WriteString(w, "data: [DONE]\n\n")
-			flusher.Flush()
+			if !m.omitDone {
+				_, _ = io.WriteString(w, "data: [DONE]\n\n")
+				flusher.Flush()
+			}
 		case "/v1/mcp":
 			m.handleMCP(w, r)
 		default:
@@ -499,7 +515,7 @@ func TestPrintModeStreamsAssistantText(t *testing.T) {
 	for _, def := range req.Tools {
 		names[def.Function.Name] = true
 	}
-	for _, want := range []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "SearchMemory"} {
+	for _, want := range []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "SearchMemory", "TodoWrite"} {
 		if !names[want] {
 			t.Errorf("tool %s not offered to the model", want)
 		}
@@ -993,7 +1009,7 @@ func TestCompleteArgumentOffersWorkspaceWords(t *testing.T) {
 		t.Fatalf("effort completion = %v", got)
 	}
 	got = a.completeArgument("/permissions", "")
-	if len(got) != 3 || got[0] != "normal" || got[1] != "auto" || got[2] != "yolo" {
+	if len(got) != 4 || got[0] != "normal" || got[1] != "auto" || got[2] != "plan" || got[3] != "yolo" {
 		t.Fatalf("permission mode completion = %v", got)
 	}
 	got = a.completeArgument("/permissions", "y")
@@ -1005,10 +1021,14 @@ func TestCompleteArgumentOffersWorkspaceWords(t *testing.T) {
 func TestPermissionsCommandSetsCyclesAndCovers(t *testing.T) {
 	a, out := testApp(t, "http://127.0.0.1:1", testAgents())
 
-	// no argument cycles normal → auto → yolo → normal
+	// no argument cycles normal → auto → plan → yolo → normal
 	a.handleSlash("/permissions")
 	if a.policy.Mode != permissions.ModeAuto {
 		t.Fatalf("mode = %v, want auto", a.policy.Mode)
+	}
+	a.handleSlash("/permissions")
+	if a.policy.Mode != permissions.ModePlan {
+		t.Fatalf("mode = %v, want plan", a.policy.Mode)
 	}
 	a.handleSlash("/permissions")
 	if a.policy.Mode != permissions.ModeYolo {
