@@ -162,6 +162,76 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
+// truncateMiddle caps s at head+tail bytes, keeping the start and the end and
+// dropping the middle. Command output puts the cause of a failure at the end,
+// so a plain prefix cut hides exactly what the model needs. Cuts land on rune
+// boundaries.
+func truncateMiddle(s string, head, tail int) string {
+	if len(s) <= head+tail {
+		return s
+	}
+	h := head
+	for h > 0 && !utf8.RuneStart(s[h]) {
+		h--
+	}
+	t := len(s) - tail
+	for t < len(s) && !utf8.RuneStart(s[t]) {
+		t++
+	}
+	return s[:h] + fmt.Sprintf("\n… (%d characters omitted) …\n", t-h) + s[t:]
+}
+
+// headTailBuffer captures process output keeping the first head bytes and the
+// last tail bytes; anything between is counted and dropped, while Write still
+// reports success so the child process keeps running.
+type headTailBuffer struct {
+	mu      sync.Mutex
+	headMax int
+	tailMax int
+	head    []byte
+	tail    []byte // at most 2*tailMax between trims
+	dropped int
+}
+
+func newHeadTailBuffer(headMax, tailMax int) *headTailBuffer {
+	return &headTailBuffer{headMax: headMax, tailMax: tailMax}
+}
+
+func (b *headTailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	if room := b.headMax - len(b.head); room > 0 {
+		take := min(room, len(p))
+		b.head = append(b.head, p[:take]...)
+		p = p[take:]
+	}
+	if len(p) > 0 {
+		b.tail = append(b.tail, p...)
+		if len(b.tail) > 2*b.tailMax {
+			cut := len(b.tail) - b.tailMax
+			b.dropped += cut
+			b.tail = append(b.tail[:0], b.tail[cut:]...)
+		}
+	}
+	return n, nil
+}
+
+func (b *headTailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	tail := b.tail
+	dropped := b.dropped
+	if len(tail) > b.tailMax {
+		dropped += len(tail) - b.tailMax
+		tail = tail[len(tail)-b.tailMax:]
+	}
+	if dropped == 0 {
+		return string(b.head) + string(tail)
+	}
+	return string(b.head) + fmt.Sprintf("\n… (%d bytes of output omitted) …\n", dropped) + string(tail)
+}
+
 // lineCount counts lines in s, treating a trailing newline as a terminator.
 func lineCount(s string) int {
 	if s == "" {

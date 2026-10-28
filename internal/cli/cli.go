@@ -5,9 +5,12 @@ package cli
 import (
 	"bufio"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -327,9 +330,13 @@ func newApp(opts options) (*app, error) {
 	renderer := ui.NewRenderer(os.Stdout, theme)
 	errRenderer := ui.NewRenderer(os.Stderr, &ui.Theme{Colors: ui.IsTerminal(os.Stderr)})
 
+	client := api.New(conn.BaseURL, conn.APIKey)
+	if clientRetryDelays != nil {
+		client.SetRetryDelays(clientRetryDelays...)
+	}
 	a := &app{
 		opts:        opts,
-		client:      api.New(conn.BaseURL, conn.APIKey),
+		client:      client,
 		theme:       theme,
 		renderer:    renderer,
 		errRenderer: errRenderer,
@@ -674,13 +681,28 @@ func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity
 	a.transcript.Append("user", display)
 
 	var turnText strings.Builder
-	spinner := out.StartSpinner("thinking…")
+	var spinner *ui.Spinner
 	stopSpinner := func() {
 		if spinner != nil {
 			spinner.Stop()
 			spinner = nil
 		}
 	}
+	startSpinner := func(msg string, delay time.Duration) {
+		stopSpinner()
+		spinner = out.StartSpinnerAfter(msg, delay)
+	}
+	startSpinner("thinking…", 0)
+
+	// Retries happen inside the client, before any output of the turn; say so
+	// instead of leaving the user staring at a spinner.
+	a.client.OnRetry = func(attempt int, wait time.Duration, err error) {
+		stopSpinner()
+		activity.Notice(fmt.Sprintf("%s — retrying in %s (attempt %d)", retryReason(err), wait.Round(100*time.Millisecond), attempt))
+		startSpinner("thinking…", 0)
+	}
+	defer func() { a.client.OnRetry = nil }()
+
 	events := agent.Events{
 		OnText: func(delta string) {
 			stopSpinner()
@@ -699,8 +721,14 @@ func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity
 			summary, _ := ui.ToolCallSummary(name, rawArgs)
 			activity.ToolStart(name, summary)
 		},
+		OnToolExec: func(name string) {
+			// only slow tools earn a spinner; quick reads never flash one
+			startSpinner("running "+name+"…", 400*time.Millisecond)
+		},
 		OnToolEnd: func(name, result string, denied bool, elapsed time.Duration) {
+			stopSpinner()
 			activity.ToolResult(result, denied, elapsed)
+			startSpinner("thinking…", 0)
 		},
 		OnNotice: func(msg string) {
 			stopSpinner()
@@ -872,6 +900,10 @@ func (a *app) runPrint() int {
 	}
 }
 
+// clientRetryDelays overrides the API client's retry schedule; tests shrink it
+// so a retry does not sleep for real. nil keeps the defaults.
+var clientRetryDelays []time.Duration
+
 // exitInterrupted is the conventional shell status for SIGINT (128 + 2).
 const exitInterrupted = 130
 
@@ -1032,9 +1064,19 @@ func friendlyErr(err error) string {
 	if errors.As(err, &notConfigured) {
 		return err.Error()
 	}
+	switch {
+	case errors.Is(err, api.ErrTruncatedStream):
+		return "the connection ended before the answer was complete — send the prompt again (the agent's server-side memory is intact)"
+	case errors.Is(err, api.ErrStreamStalled):
+		return "the server stopped sending data mid-answer — check that it is healthy, or raise " + api.EnvStreamIdleTimeout + " for very slow models"
+	}
 	var apiErr *api.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.Status {
+		case 429:
+			return "the server is rate limiting requests (HTTP 429): " + apiErr.Message + " — wait a moment and try again"
+		case 500, 502, 503, 504:
+			return fmt.Sprintf("the turnlith server had a problem (HTTP %d): %s", apiErr.Status, apiErr.Message)
 		case 401:
 			return "authentication failed — the api key was rejected (run `tlc configure`)"
 		case 402:
@@ -1051,5 +1093,47 @@ func friendlyErr(err error) string {
 	if errors.Is(err, io.EOF) {
 		return "the server closed the connection unexpectedly"
 	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		var unknownAuthority x509.UnknownAuthorityError
+		var certInvalid x509.CertificateInvalidError
+		var hostErr x509.HostnameError
+		switch {
+		case errors.As(err, &unknownAuthority), errors.As(err, &certInvalid), errors.As(err, &hostErr):
+			return fmt.Sprintf("TLS certificate problem talking to %s: %v", urlHost(urlErr.URL), urlErr.Err)
+		case isTimeout(err):
+			return fmt.Sprintf("the request to %s timed out — is the server reachable?", urlHost(urlErr.URL))
+		default:
+			return fmt.Sprintf("cannot reach %s: %v — check the URL (`tlc configure`) and that the server is running", urlHost(urlErr.URL), urlErr.Err)
+		}
+	}
 	return err.Error()
+}
+
+// retryReason names, in a few words, why the client is about to retry.
+func retryReason(err error) string {
+	var apiErr *api.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Status {
+		case 429:
+			return "rate limited by the server"
+		case 502, 503:
+			return "server unavailable"
+		}
+	}
+	return "cannot connect to the server"
+}
+
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// urlHost shows just scheme://host of a request URL, never a path or query.
+func urlHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	return u.Scheme + "://" + u.Host
 }

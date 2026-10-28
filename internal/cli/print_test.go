@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"errors"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
 )
@@ -78,5 +81,78 @@ func TestPrintModeStdinAloneIsThePrompt(t *testing.T) {
 	got, _ := lastMessage(t, srv.requests()[0]).Content.(string)
 	if got != "explain main.go" {
 		t.Fatalf("prompt = %q", got)
+	}
+}
+
+func fastRetries(t *testing.T) {
+	t.Helper()
+	clientRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { clientRetryDelays = nil })
+}
+
+func TestPrintModeRetriesRateLimitAndSucceeds(t *testing.T) {
+	fastRetries(t)
+	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
+		return []string{finalChunk(t, "made it", 10, 2)}
+	})
+	srv.chatFail = func(turn int) (int, string) {
+		if turn < 2 {
+			return 429, `{"error":{"message":"slow down","code":"rate_limited"}}`
+		}
+		return 0, ""
+	}
+	setupEnv(t, srv.URL)
+
+	res := runTLC(t, t.TempDir(), "-p", "hi")
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stdout", res.stdout, "made it")
+	mustContain(t, "stderr", res.stderr, "rate limited by the server")
+	mustContain(t, "stderr", res.stderr, "retrying in")
+	if strings.Contains(res.stdout, "retrying") {
+		t.Fatalf("retry notice leaked into stdout: %q", res.stdout)
+	}
+}
+
+func TestPrintModeTruncatedStreamIsReportedAndFails(t *testing.T) {
+	fastRetries(t)
+	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
+		return []string{textChunk(t, "half an ans")}
+	})
+	srv.omitDone = true
+	setupEnv(t, srv.URL)
+
+	res := runTLC(t, t.TempDir(), "-p", "hi")
+	if res.code != 1 {
+		t.Fatalf("code=%d, want 1; stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, "ended before the answer was complete")
+	mustContain(t, "stdout", res.stdout, "half an ans")
+	if n := len(srv.requests()); n != 1 {
+		t.Fatalf("a stream that produced output must not be re-sent (requests=%d)", n)
+	}
+}
+
+func TestFriendlyErrMessages(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"429", &api.APIError{Status: 429, Message: "slow down"}, "rate limiting"},
+		{"503", &api.APIError{Status: 503, Message: "overloaded"}, "turnlith server had a problem (HTTP 503)"},
+		{"truncated", api.ErrTruncatedStream, "ended before the answer was complete"},
+		{"stalled", api.ErrStreamStalled, api.EnvStreamIdleTimeout},
+		{"refused", &url.Error{Op: "Post", URL: "http://localhost:1/v1/chat/completions?x=secret", Err: errors.New("dial tcp: connection refused")}, "cannot reach http://localhost:1"},
+	}
+	for _, c := range cases {
+		got := friendlyErr(c.err)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%s: %q does not contain %q", c.name, got, c.want)
+		}
+		if strings.Contains(got, "secret") {
+			t.Errorf("%s: query string leaked: %q", c.name, got)
+		}
 	}
 }

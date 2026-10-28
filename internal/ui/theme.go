@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
@@ -107,32 +108,57 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 type Spinner struct {
 	renderer *Renderer
 	msg      string
+	delay    time.Duration
+	drawn    bool // guarded by renderer.mu
 	stop     chan struct{}
 	done     chan struct{}
 }
 
-func (r *Renderer) StartSpinner(msg string) *Spinner {
+func (r *Renderer) StartSpinner(msg string) *Spinner { return r.StartSpinnerAfter(msg, 0) }
+
+// StartSpinnerAfter starts a spinner that only appears once delay has passed,
+// so work that finishes quickly never flashes a frame.
+func (r *Renderer) StartSpinnerAfter(msg string, delay time.Duration) *Spinner {
 	if !r.Theme.Colors || !r.spinnerEnabled {
 		return nil
 	}
-	sp := &Spinner{renderer: r, msg: msg, stop: make(chan struct{}), done: make(chan struct{})}
+	sp := &Spinner{renderer: r, msg: msg, delay: delay, stop: make(chan struct{}), done: make(chan struct{})}
 	go sp.loop()
 	return sp
 }
 
+// spinnerLabel adds the elapsed time and the interrupt hint once a wait has
+// gone on long enough for the user to wonder whether anything is happening.
+func spinnerLabel(msg string, elapsed time.Duration) string {
+	if elapsed < 3*time.Second {
+		return msg
+	}
+	return fmt.Sprintf("%s (%ds · Ctrl-C to interrupt)", msg, int(elapsed.Seconds()))
+}
+
 func (s *Spinner) loop() {
 	defer close(s.done)
+	if s.delay > 0 {
+		select {
+		case <-s.stop:
+			return
+		case <-timeAfter(s.delay):
+		}
+	}
+	started := time.Now()
 	i := 0
 	for {
 		frame := s.renderer.Theme.Accent(spinnerFrames[i%len(spinnerFrames)])
+		label := spinnerLabel(s.msg, time.Since(started))
 		s.renderer.mu.Lock()
-		fmt.Fprintf(s.renderer.Out, "\r\x1b[K%s %s", frame, s.renderer.Theme.Dim(s.msg))
+		fmt.Fprintf(s.renderer.Out, "\r\x1b[K%s %s", frame, s.renderer.Theme.Dim(label))
+		s.drawn = true
 		s.renderer.mu.Unlock()
 		i++
 		select {
 		case <-s.stop:
 			return
-		case <-timeAfter(100):
+		case <-timeAfter(100 * time.Millisecond):
 		}
 	}
 }
@@ -149,6 +175,8 @@ func (s *Spinner) Stop() {
 	}
 	<-s.done
 	s.renderer.mu.Lock()
-	fmt.Fprint(s.renderer.Out, "\r\x1b[K")
+	if s.drawn {
+		fmt.Fprint(s.renderer.Out, "\r\x1b[K")
+	}
 	s.renderer.mu.Unlock()
 }

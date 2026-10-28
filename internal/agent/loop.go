@@ -34,9 +34,12 @@ type Events struct {
 	OnText      func(delta string)
 	OnTurnEnd   func() // one assistant turn finished streaming
 	OnToolStart func(name, rawArgs string)
-	OnToolEnd   func(name, result string, denied bool, elapsed time.Duration)
-	OnNotice    func(msg string)
-	OnUsage     func(usage api.Usage)
+	// OnToolExec fires once a call is cleared to run (after any permission
+	// prompt), right before the tool starts — the moment to show activity.
+	OnToolExec func(name string)
+	OnToolEnd  func(name, result string, denied bool, elapsed time.Duration)
+	OnNotice   func(msg string)
+	OnUsage    func(usage api.Usage)
 }
 
 const defaultMaxSteps = 40
@@ -96,6 +99,9 @@ func (r *Runner) Run(ctx context.Context, prompt string, ev Events) error {
 		if ev.OnUsage != nil {
 			ev.OnUsage(turn.Usage)
 		}
+		if turn.FinishReason == "length" && ev.OnNotice != nil {
+			ev.OnNotice("the model hit its output limit and the reply was cut off")
+		}
 
 		r.history = append(r.history, api.AssistantMessage(turn.Text, turn.ToolCalls))
 		if len(turn.ToolCalls) == 0 {
@@ -150,6 +156,13 @@ func (r *Runner) execute(ctx context.Context, call api.ToolCall, ev Events) (str
 		ev.OnToolEnd(name, result, denied, time.Since(start))
 	}
 	return result, nil
+}
+
+func (r *Runner) execTool(ctx context.Context, name, rawArgs string, ev Events) string {
+	if ev.OnToolExec != nil {
+		ev.OnToolExec(name)
+	}
+	return r.runTool(ctx, name, rawArgs)
 }
 
 func (r *Runner) runTool(ctx context.Context, name, rawArgs string) string {
