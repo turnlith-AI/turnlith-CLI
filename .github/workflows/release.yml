@@ -64,7 +64,7 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match version.go ($got)" >&2
             exit 1
           fi
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
