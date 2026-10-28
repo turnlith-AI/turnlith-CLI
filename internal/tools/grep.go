@@ -53,6 +53,19 @@ func (t *GrepTool) NeedsPermission(raw json.RawMessage) (string, bool) {
 	return outsideWorkspace(t.Root, args.Path)
 }
 
+// Prepare implements Preparer: refuse credential directories before any prompt.
+func (t *GrepTool) Prepare(raw json.RawMessage) (string, error) {
+	var args grepArgs
+	if err := decodeArgs(raw, &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+	if args.Path == "" {
+		return "", nil
+	}
+	_, err := resolvePath(t.Root, args.Path)
+	return "", err
+}
+
 // ConcurrencySafe: read-only and stateless, so calls may overlap.
 func (t *GrepTool) ConcurrencySafe() bool { return true }
 

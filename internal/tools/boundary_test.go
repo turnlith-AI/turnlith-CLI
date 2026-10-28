@@ -176,3 +176,30 @@ func TestWorkspaceRootBehindASymlinkStillCountsAsInside(t *testing.T) {
 		}
 	}
 }
+
+func TestReadOnlyToolsRejectCredentialPathsAtPreparation(t *testing.T) {
+	home := fakeHome(t)
+	dir := t.TempDir()
+	cases := []struct {
+		tool Tool
+		args map[string]any
+	}{
+		{&ReadTool{Root: dir, Tracker: NewTracker()}, map[string]any{"file_path": filepath.Join(home, ".ssh", "id_rsa")}},
+		{&GlobTool{Root: dir}, map[string]any{"pattern": "*", "path": filepath.Join(home, ".aws")}},
+		{&GlobTool{Root: dir}, map[string]any{"pattern": filepath.Join(home, ".ssh") + "/*"}},
+		{&GrepTool{Root: dir}, map[string]any{"pattern": "x", "path": filepath.Join(home, ".config", "tlith")}},
+	}
+	for _, c := range cases {
+		if _, err := prepare(t, c.tool, c.args); err == nil || !strings.Contains(err.Error(), "blocked") {
+			t.Errorf("%s %v: err = %v", c.tool.Name(), c.args, err)
+		}
+	}
+	// ordinary reads prepare cleanly
+	writeFile(t, dir, "a.txt", "x")
+	if _, err := prepare(t, &ReadTool{Root: dir, Tracker: NewTracker()}, map[string]any{"file_path": "a.txt"}); err != nil {
+		t.Errorf("plain read: %v", err)
+	}
+	if _, err := prepare(t, &GlobTool{Root: dir}, map[string]any{"pattern": "**/*.go"}); err != nil {
+		t.Errorf("plain glob: %v", err)
+	}
+}

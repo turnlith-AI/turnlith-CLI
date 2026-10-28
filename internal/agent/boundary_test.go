@@ -173,3 +173,27 @@ func TestPermissionPromptShowsTheRealDiff(t *testing.T) {
 		t.Fatalf("preview should be a numbered diff, got:\n%s", prev)
 	}
 }
+
+func TestCredentialPathsAreRefusedWithoutEverAsking(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	secret := filepath.Join(home, ".ssh", "id_rsa")
+	if err := os.MkdirAll(filepath.Dir(secret), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("PRIVATE KEY MATERIAL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []permissions.Mode{permissions.ModeAsk, permissions.ModeAuto, permissions.ModeYolo} {
+		prompter := &recordingPrompter{answer: permissions.AllowOnce}
+		got := runOneTool(t, mode, prompter, t.TempDir(), "Read", fmt.Sprintf(`{"file_path":%q}`, secret))
+		if len(prompter.reqs) != 0 {
+			t.Errorf("%v: asked the user to approve reading a credential file: %+v", mode, prompter.reqs)
+		}
+		if !strings.Contains(got, "blocked") || strings.Contains(got, "PRIVATE KEY") {
+			t.Errorf("%v: model saw %q", mode, got)
+		}
+	}
+}

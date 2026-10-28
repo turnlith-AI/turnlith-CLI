@@ -56,6 +56,29 @@ func (t *GlobTool) NeedsPermission(raw json.RawMessage) (string, bool) {
 	return patternOutside(t.Root, base, args.Pattern)
 }
 
+// Prepare implements Preparer: refuse credential directories, whether named
+// by path or by the pattern's own directory, before any prompt.
+func (t *GlobTool) Prepare(raw json.RawMessage) (string, error) {
+	var args globArgs
+	if err := decodeArgs(raw, &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+	base := t.Root
+	if args.Path != "" {
+		abs, err := resolvePath(t.Root, args.Path)
+		if err != nil {
+			return "", err
+		}
+		base = abs
+	}
+	if dir := patternDir(base, args.Pattern); dir != "" {
+		if reason := credentialReason(dir); reason != "" {
+			return "", fmt.Errorf("access to %s is blocked: %s", dir, reason)
+		}
+	}
+	return "", nil
+}
+
 // ConcurrencySafe: read-only and stateless, so calls may overlap.
 func (t *GlobTool) ConcurrencySafe() bool { return true }
 

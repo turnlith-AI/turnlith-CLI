@@ -404,3 +404,79 @@ func TestDenialWithoutAReasonIsTheStandardMessage(t *testing.T) {
 		t.Fatalf("got %q", p.DenialFor("Edit"))
 	}
 }
+
+// A parser that thinks it is inside quotes while the shell is not would hide a
+// real separator from the rules — the dangerous direction to be wrong in.
+func TestSplitCommandAgreesWithTheShellAboutQuoting(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		segs []string
+	}{
+		// ANSI-C quoting: \' does not end the string
+		{`echo $'a\'b' ; rm x`, []string{`echo $'a\'b'`, "rm x"}},
+		{`echo $'it\'s' && rm x`, []string{`echo $'it\'s'`, "rm x"}},
+		{`echo $'a;b' ; ls`, []string{`echo $'a;b'`, "ls"}},
+		// plain single quotes have no escapes at all
+		{`echo 'a\' ; rm x`, []string{`echo 'a\'`, "rm x"}},
+		// an escaped quote outside quotes is just a character
+		{`echo \' ; rm x`, []string{`echo \'`, "rm x"}},
+		// an escaped quote inside double quotes does not end them
+		{`echo "a\" ; b" ; rm x`, []string{`echo "a\" ; b"`, "rm x"}},
+		// $"…" is a double-quoted string
+		{`echo $"a ; b" ; rm x`, []string{`echo $"a ; b"`, "rm x"}},
+	}
+	for _, c := range cases {
+		segs, safe := splitCommand(c.cmd)
+		if !safe || !reflect.DeepEqual(segs, c.segs) {
+			t.Errorf("%q\n got %q (safe=%v)\nwant %q", c.cmd, segs, safe, c.segs)
+		}
+	}
+}
+
+func TestAnsiCQuotingCannotSmuggleACommandPastAnAllowRule(t *testing.T) {
+	p, q := policyWith(t, []string{"Bash(echo:*)"}, nil)
+	q.answers = []Decision{Deny}
+	if ok, _ := p.Approve(context.Background(), req("Bash", `echo $'a\'b' ; rm -rf x`)); ok {
+		t.Fatal("the rm segment must not ride in on the echo rule")
+	}
+	if q.asked != 1 {
+		t.Fatalf("the user should have been asked: asked=%d", q.asked)
+	}
+	// the harmless form is still covered
+	if ok, _ := p.Approve(context.Background(), req("Bash", `echo $'tab\there'`)); !ok {
+		t.Fatal("a plain ANSI-C string is fine")
+	}
+}
+
+func TestDevNullRedirectNeedsTheExactPath(t *testing.T) {
+	for _, cmd := range []string{"make > /dev/null", "make >/dev/null", "make 2>/dev/null", "make > /dev/null 2>&1", "make >/dev/null;ls"} {
+		if _, safe := splitCommand(cmd); !safe {
+			t.Errorf("%q redirects to /dev/null and should be safe", cmd)
+		}
+	}
+	for _, cmd := range []string{"make > /dev/nullx", "make >/dev/null/../tmp/x", "make > /dev/null.txt", "make > /dev/nul"} {
+		if _, safe := splitCommand(cmd); safe {
+			t.Errorf("%q must not count as a /dev/null redirect", cmd)
+		}
+	}
+}
+
+func FuzzSplitCommand(f *testing.F) {
+	for _, s := range []string{"go test ./...", `echo $'a\'b' ; rm x`, "a && b || c | d & e", "make 2>&1 >/dev/null", "echo \"$(x)\" `y`", "cat <<EOF\nx\nEOF", "'", `"`, `\`, "$'", "$("} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, cmd string) {
+		segs, _ := splitCommand(cmd)
+		for _, s := range segs {
+			if s == "" || s != strings.TrimSpace(s) {
+				t.Fatalf("malformed segment %q from %q", s, cmd)
+			}
+		}
+		// deciding must never panic either, whatever the rules
+		p := &Policy{Mode: ModeAsk}
+		p.AddAllow(Rule{Tool: "Bash", Pattern: "echo:*"})
+		p.AddDeny(Rule{Tool: "Bash", Pattern: "rm:*"})
+		_, _ = p.Approve(context.Background(), Request{Tool: "Bash", Subject: cmd})
+		_ = SuggestRule(Request{Tool: "Bash", Subject: cmd})
+	})
+}

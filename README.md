@@ -283,8 +283,10 @@ JSONL files under `~/.local/share/tlith/tlc/sessions/`, one per session, so
 
 ```sh
 make build     # bin/tlc
+make check     # what CI runs: gofmt, vet, race tests, cross-platform vet, go mod tidy
 make test      # unit + end-to-end tests against a mock server (no network)
-make vet
+make race      # the same with the race detector
+make cross     # vet the windows/arm64/darwin targets
 make fmt
 ```
 
@@ -334,6 +336,14 @@ internal/harness/   opencode wiring (JSONC-aware config merge)
 internal/history/   local JSONL transcripts
 internal/config/    connection file + tlc preferences
 ```
+
+## More documentation
+
+- [docs/architecture.md](docs/architecture.md) — how a prompt flows, how a tool call is decided, where state lives
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, conventions, how to add a tool, command or flag
+- [SECURITY.md](SECURITY.md) — what `tlc` protects, what it does not, how to report a problem
+- [CHANGELOG.md](CHANGELOG.md) — what changed in each release
+- [docs/server-session-scoping.md](docs/server-session-scoping.md) — proposal: per-project conversations on the server
 
 ## License
 

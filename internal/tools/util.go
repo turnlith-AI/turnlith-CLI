@@ -113,6 +113,20 @@ func patternOutside(root, base, pattern string) (string, bool) {
 			return "pattern climbs out of the working directory: " + pattern, true
 		}
 	}
+	dir := patternDir(base, pattern)
+	if insideRoot(root, dir) {
+		return "", false
+	}
+	return "outside the working directory: " + dir, true
+}
+
+// patternDir is the directory a glob pattern starts in: its static prefix (the
+// part before the first wildcard) resolved against base. "" for an empty pattern.
+func patternDir(base, pattern string) string {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return ""
+	}
 	prefix := pattern
 	if i := strings.IndexAny(prefix, "*?[{"); i >= 0 {
 		prefix = prefix[:i]
@@ -122,18 +136,14 @@ func patternOutside(root, base, pattern string) (string, bool) {
 	} else {
 		prefix = ""
 	}
-	dir := base
-	if prefix != "" {
-		if filepath.IsAbs(prefix) {
-			dir = filepath.Clean(prefix)
-		} else {
-			dir = filepath.Join(base, prefix)
-		}
+	switch {
+	case prefix == "":
+		return base
+	case filepath.IsAbs(prefix):
+		return filepath.Clean(prefix)
+	default:
+		return filepath.Join(base, prefix)
 	}
-	if insideRoot(root, dir) {
-		return "", false
-	}
-	return "outside the working directory: " + dir, true
 }
 
 // credentialReason names why a path is a credential store, or "" if it is not.

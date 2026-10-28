@@ -103,13 +103,27 @@ func splitCommand(cmd string) (segs []string, safe bool) {
 		cur.Reset()
 	}
 	rs := []rune(cmd)
-	inSingle, inDouble := false, false
+	inSingle, inDouble, inANSI := false, false, false
 	for i := 0; i < len(rs); i++ {
 		c := rs[i]
 		switch {
 		case inSingle:
 			if c == '\'' {
 				inSingle = false
+			}
+			cur.WriteRune(c)
+		case inANSI:
+			// $'…' is the one single-quote form where a backslash escapes: \'
+			// does not end the string. Misjudging this would hide a real
+			// separator inside "quotes" the shell has already left.
+			switch {
+			case c == '\\' && i+1 < len(rs):
+				cur.WriteRune(c)
+				i++
+				cur.WriteRune(rs[i])
+				continue
+			case c == '\'':
+				inANSI = false
 			}
 			cur.WriteRune(c)
 		case c == '\\' && i+1 < len(rs):
@@ -124,6 +138,10 @@ func splitCommand(cmd string) (segs []string, safe bool) {
 				safe = false
 			}
 			cur.WriteRune(c)
+		case c == '$' && i+1 < len(rs) && rs[i+1] == '\'':
+			inANSI = true
+			cur.WriteString("$'")
+			i++
 		case c == '\'':
 			inSingle = true
 			cur.WriteRune(c)
@@ -146,7 +164,7 @@ func splitCommand(cmd string) (segs []string, safe bool) {
 				cur.WriteString(string(rs[i+1 : i+1+skip]))
 				cur.WriteString(string(rs[i+1+skip : i+1+skip+2]))
 				i += skip + 2
-			case strings.HasPrefix(rest, "/dev/null"):
+			case isDevNull(rest):
 				cur.WriteRune(c)
 			default:
 				safe = false
@@ -165,6 +183,16 @@ func splitCommand(cmd string) (segs []string, safe bool) {
 	}
 	flush()
 	return segs, safe
+}
+
+// isDevNull reports whether a redirect target is exactly /dev/null: the path,
+// then the end of the text or a character that ends a word.
+func isDevNull(rest string) bool {
+	after, ok := strings.CutPrefix(rest, "/dev/null")
+	if !ok {
+		return false
+	}
+	return after == "" || strings.ContainsRune(" \t\n;&|)", rune(after[0]))
 }
 
 // readOnlyBuiltins are commands that never change anything, so asking about
