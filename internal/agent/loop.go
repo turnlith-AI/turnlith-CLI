@@ -23,6 +23,9 @@ type Runner struct {
 	Policy       *permissions.Policy
 	Agent        string
 	SystemPrompt string
+	// Root is the workspace directory; permission rules match file paths
+	// relative to it.
+	Root string
 	// MaxSteps caps tool rounds per prompt (0 = default).
 	MaxSteps int
 
@@ -43,6 +46,11 @@ type Events struct {
 }
 
 const defaultMaxSteps = 40
+
+// ErrStepLimit ends a run that used up its model turns without finishing. The
+// OnNotice event already told the user; callers that script tlc treat it as a
+// failure.
+var ErrStepLimit = errors.New("step limit reached")
 
 // Reset drops the local task history; server-side memory is unaffected.
 func (r *Runner) Reset() { r.history = nil }
@@ -74,7 +82,7 @@ func (r *Runner) Run(ctx context.Context, prompt string, ev Events) error {
 			if ev.OnNotice != nil {
 				ev.OnNotice(fmt.Sprintf("reached the %d-step tool limit — stopping; ask again to continue", maxSteps))
 			}
-			return nil
+			return ErrStepLimit
 		}
 
 		req := api.ChatRequest{
@@ -145,6 +153,7 @@ func (r *Runner) execute(ctx context.Context, call api.ToolCall, ev Events) (str
 			Category: tool.Category(),
 			Summary:  summary,
 			Preview:  preview,
+			Subject:  tools.Subject(r.Root, name, json.RawMessage(call.Function.Arguments)),
 			External: external,
 			Reason:   reason,
 		})

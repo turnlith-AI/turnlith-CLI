@@ -118,7 +118,8 @@ func TestAlwaysRemembers(t *testing.T) {
 	p := queuePrompter{answers: []Decision{AllowAlways}}
 	policy := &Policy{Prompter: &p}
 	for i := 0; i < 3; i++ {
-		ok, err := policy.Approve(context.Background(), Request{Tool: "Bash"})
+		// "always" is scoped to the command's prefix (go test), not to Bash as a whole
+		ok, err := policy.Approve(context.Background(), Request{Tool: "Bash", Subject: "go test ./..."})
 		if err != nil || !ok {
 			t.Fatalf("iteration %d: ok=%v err=%v", i, ok, err)
 		}

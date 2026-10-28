@@ -126,10 +126,21 @@ func (r *REPL) ReadSecret(prompt string) (string, error) {
 func (r *REPL) Close() { _ = r.rl.Close() }
 
 // Prompt implements permissions.Prompter for gated tool calls. One keypress
-// answers — no Enter: y allow · a always · n deny · x never; Enter allows,
-// Ctrl-C aborts. Platforms without a raw-mode stdin fall back to typing.
+// answers — no Enter: y allow · a always · p always in this project · n deny ·
+// x never; Enter allows, Ctrl-C aborts. a/p/x are only live when there is an
+// honest rule to remember. Platforms without a raw-mode stdin fall back to
+// typing.
 func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
-	r.renderer.PermissionBlock(req.Tool, req.Summary, req.Preview, req.Reason)
+	view := PermissionView{Tool: req.Tool, Summary: req.Summary, Preview: req.Preview, Note: req.Reason}
+	if rule := permissions.SuggestRule(req); rule != nil {
+		view.Remember, view.Project, view.Rule = true, true, rule.String()
+		if rule.Pattern == "" {
+			view.Rule = rule.Tool + " (any " + strings.ToLower(rule.Tool) + ")"
+		}
+	} else if req.External {
+		view.Remember = true
+	}
+	r.renderer.PermissionBlock(view)
 	for {
 		if key, ok := readSingleKey(); ok {
 			switch key {
@@ -137,14 +148,23 @@ func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
 				r.echoAnswer("y allow")
 				return permissions.AllowOnce, nil
 			case "a":
-				r.echoAnswer("a always this session")
-				return permissions.AllowAlways, nil
+				if view.Remember {
+					r.echoAnswer("a always (this session)")
+					return permissions.AllowAlways, nil
+				}
+			case "p":
+				if view.Project {
+					r.echoAnswer("p always in this project")
+					return permissions.AllowProject, nil
+				}
 			case "n", "esc":
 				r.echoAnswer("n deny")
 				return permissions.Deny, nil
 			case "x":
-				r.echoAnswer("x never this session")
-				return permissions.DenyAlways, nil
+				if view.Remember {
+					r.echoAnswer("x never (this session)")
+					return permissions.DenyAlways, nil
+				}
 			case "ctrlC":
 				r.echoAnswer("^C")
 				return permissions.Deny, permissions.ErrAborted
@@ -163,14 +183,21 @@ func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
 		case "", "y", "yes":
 			return permissions.AllowOnce, nil
 		case "a", "always":
-			return permissions.AllowAlways, nil
+			if view.Remember {
+				return permissions.AllowAlways, nil
+			}
+		case "p", "project":
+			if view.Project {
+				return permissions.AllowProject, nil
+			}
 		case "n", "no":
 			return permissions.Deny, nil
 		case "x", "never":
-			return permissions.DenyAlways, nil
-		default:
-			r.renderer.Infof("%s", r.theme.Dim("please answer y, a, n, or x"))
+			if view.Remember {
+				return permissions.DenyAlways, nil
+			}
 		}
+		r.renderer.Infof("%s", r.theme.Dim("please answer with one of the letters shown"))
 	}
 }
 

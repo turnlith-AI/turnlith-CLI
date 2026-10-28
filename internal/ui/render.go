@@ -170,29 +170,62 @@ func humanTokens(n int) string {
 	}
 }
 
+// PermissionView is everything the permission prompt shows.
+type PermissionView struct {
+	Tool, Summary, Preview string
+	// Note is a warning line (e.g. why the call is outside the workspace).
+	Note string
+	// Rule is the rule an "always" answer would remember (empty: none).
+	Rule string
+	// Remember says whether a/x (session) are offered; Project whether p is.
+	Remember, Project bool
+}
+
+// permissionOptions renders the answer legend for a prompt.
+func (r *Renderer) permissionOptions(v PermissionView) string {
+	parts := []string{"[y] allow"}
+	if v.Remember {
+		always := "[a] always"
+		if v.Rule != "" {
+			always += " " + v.Rule
+		} else {
+			always += " (outside the workspace)"
+		}
+		parts = append(parts, always)
+	}
+	if v.Project {
+		parts = append(parts, "[p] always in this project")
+	}
+	parts = append(parts, "[n] deny")
+	if v.Remember {
+		parts = append(parts, "[x] never")
+	}
+	return r.Theme.Dim(strings.Join(parts, " · "))
+}
+
 // PermissionBlock renders a gated tool call — a header naming the tool and
-// what it will do, the diff-colored preview, and the answer options — before
-// the REPL reads the one-key answer.
-func (r *Renderer) PermissionBlock(name, summary, preview, note string) {
+// what it will do, a warning if the call is unusual, the diff-colored preview,
+// and the answer options — before the REPL reads the one-key answer.
+func (r *Renderer) PermissionBlock(v PermissionView) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.lastByte != 0 && r.lastByte != '\n' {
 		r.writeLocked("\n")
 	}
-	header := "  " + r.Theme.Accent(GlyphTool) + " " + r.Theme.Bold(name)
-	if summary != "" {
-		header += r.Theme.Dim("(" + sanitizeInline(summary) + ")")
+	header := "  " + r.Theme.Accent(GlyphTool) + " " + r.Theme.Bold(v.Tool)
+	if v.Summary != "" {
+		header += r.Theme.Dim("(" + sanitizeInline(v.Summary) + ")")
 	}
 	r.writeLocked(header + "\n")
-	if note != "" {
-		r.writeLocked("    " + r.Theme.Yellow("⚠ "+sanitizeInline(note)) + "\n")
+	if v.Note != "" {
+		r.writeLocked("    " + r.Theme.Yellow("⚠ "+sanitizeInline(v.Note)) + "\n")
 	}
-	if preview != "" {
-		for _, line := range strings.Split(sanitizeBlock(preview), "\n") {
+	if v.Preview != "" {
+		for _, line := range strings.Split(sanitizeBlock(v.Preview), "\n") {
 			r.writeLocked("    " + stylePreviewLine(r, line) + "\n")
 		}
 	}
-	r.writeLocked("  " + r.Theme.Dim("[y] allow · [a] always · [n] deny · [x] never") + "\n")
+	r.writeLocked("  " + r.permissionOptions(v) + "\n")
 	r.lastByte = '\n'
 }
 

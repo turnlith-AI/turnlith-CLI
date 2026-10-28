@@ -34,6 +34,9 @@ type Connection struct {
 // Prefs are tlc-local preferences.
 type Prefs struct {
 	DefaultAgent string `json:"defaultAgent,omitempty"`
+	// Projects holds per-project choices, keyed by the project's canonical
+	// root directory (see ProjectPrefs).
+	Projects map[string]ProjectPrefs `json:"projects,omitempty"`
 }
 
 // ErrNotConfigured reports a missing connection with setup guidance.

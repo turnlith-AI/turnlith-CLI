@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -164,6 +165,44 @@ func credentialReason(abs string) string {
 		return "tlc's own api key and settings are off limits to tools"
 	}
 	return ""
+}
+
+// Subject extracts what permission rules match against: the full command for
+// Bash, the workspace-relative (slash-separated) path for file tools. It is
+// "" for tools with nothing to match.
+func Subject(root, tool string, rawArgs json.RawMessage) string {
+	var args struct {
+		Command  string `json:"command"`
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"`
+	}
+	if len(rawArgs) == 0 || json.Unmarshal(rawArgs, &args) != nil {
+		return ""
+	}
+	var p string
+	switch tool {
+	case "Bash":
+		return strings.TrimSpace(args.Command)
+	case "Read", "Write", "Edit":
+		p = args.FilePath
+	case "Glob", "Grep":
+		p = args.Path
+		if p == "" {
+			return "."
+		}
+	default:
+		return ""
+	}
+	abs, err := resolvePathRaw(root, p)
+	if err != nil {
+		return ""
+	}
+	if insideRoot(root, abs) {
+		if rel, err := filepath.Rel(root, abs); err == nil {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.ToSlash(abs)
 }
 
 // relativePath renders p relative to root when it is inside root.
