@@ -33,6 +33,17 @@ func (t *ReadTool) Schema() json.RawMessage {
 
 func (t *ReadTool) Gated() bool { return false }
 
+// NeedsPermission asks before touching files outside the working directory.
+func (t *ReadTool) NeedsPermission(raw json.RawMessage) (string, bool) {
+	var args struct {
+		FilePath string `json:"file_path"`
+	}
+	if decodeArgs(raw, &args) != nil {
+		return "", false
+	}
+	return outsideWorkspace(t.Root, args.FilePath)
+}
+
 func (t *ReadTool) Category() string { return permissions.CategoryRead }
 
 const (

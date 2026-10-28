@@ -37,6 +37,25 @@ func (t *GlobTool) Schema() json.RawMessage {
 
 func (t *GlobTool) Gated() bool { return false }
 
+// NeedsPermission asks before listing outside the working directory, whether
+// through the path argument or a pattern that climbs or points elsewhere.
+func (t *GlobTool) NeedsPermission(raw json.RawMessage) (string, bool) {
+	var args globArgs
+	if decodeArgs(raw, &args) != nil {
+		return "", false
+	}
+	base := t.Root
+	if args.Path != "" {
+		if reason, out := outsideWorkspace(t.Root, args.Path); out {
+			return reason, true
+		}
+		if abs, err := resolvePathRaw(t.Root, args.Path); err == nil {
+			base = abs
+		}
+	}
+	return patternOutside(t.Root, base, args.Pattern)
+}
+
 func (t *GlobTool) Category() string { return permissions.CategoryRead }
 
 type globArgs struct {

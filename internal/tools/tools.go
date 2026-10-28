@@ -30,6 +30,14 @@ type Tool interface {
 	Run(ctx context.Context, args json.RawMessage) (string, error)
 }
 
+// ArgGater is implemented by tools whose need for permission depends on the
+// arguments of a call (a Read is free inside the workspace but asks outside
+// it). Calls that need permission are "external": auto mode does not wave them
+// through and an "always" answer for the tool does not cover them.
+type ArgGater interface {
+	NeedsPermission(args json.RawMessage) (reason string, need bool)
+}
+
 // Registry holds the active tool set.
 type Registry struct {
 	list   []Tool

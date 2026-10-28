@@ -10,11 +10,14 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/turnlith-AI/turnlith-CLI/internal/config"
 )
 
-// resolvePath turns a tool-provided path into an absolute path: absolute
-// paths and ~ are honored, everything else is relative to root.
-func resolvePath(root, p string) (string, error) {
+// resolvePathRaw turns a tool-provided path into an absolute path: absolute
+// paths and ~ are honored, everything else is relative to root. It does not
+// judge the result; resolvePath does.
+func resolvePathRaw(root, p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" {
 		return "", errors.New("missing required path")
@@ -29,6 +32,138 @@ func resolvePath(root, p string) (string, error) {
 		p = filepath.Join(root, p)
 	}
 	return filepath.Clean(p), nil
+}
+
+// resolvePath is resolvePathRaw plus the hard rule that credential stores
+// (ssh keys, cloud credentials, tlc's own api key file) are never readable or
+// writable by tools, in any permission mode — a model that can read them can
+// ship them to a server.
+func resolvePath(root, p string) (string, error) {
+	abs, err := resolvePathRaw(root, p)
+	if err != nil {
+		return "", err
+	}
+	if reason := credentialReason(abs); reason != "" {
+		return "", fmt.Errorf("access to %s is blocked: %s", abs, reason)
+	}
+	return abs, nil
+}
+
+// canonicalAllowMissing resolves symlinks in the longest existing prefix of p,
+// so paths that do not exist yet (a file about to be written) are still
+// judged by where their directory really lives.
+func canonicalAllowMissing(p string) string {
+	p = filepath.Clean(p)
+	var rest []string
+	for cur := p; ; {
+		if real, err := filepath.EvalSymlinks(cur); err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				real = filepath.Join(real, rest[i])
+			}
+			return real
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = append(rest, filepath.Base(cur))
+		cur = parent
+	}
+}
+
+// isUnder reports whether path is dir itself or inside it (both canonical).
+func isUnder(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// insideRoot reports whether abs lies within the workspace root, judged after
+// symlink resolution on both sides.
+func insideRoot(root, abs string) bool {
+	return isUnder(canonicalAllowMissing(abs), canonicalAllowMissing(root))
+}
+
+// outsideWorkspace reports, with a human reason, that a tool-provided path
+// reaches outside the workspace root.
+func outsideWorkspace(root, p string) (string, bool) {
+	if strings.TrimSpace(p) == "" {
+		return "", false
+	}
+	abs, err := resolvePathRaw(root, p)
+	if err != nil || insideRoot(root, abs) {
+		return "", false
+	}
+	return "outside the working directory: " + abs, true
+}
+
+// patternOutside judges a glob pattern against the workspace: its static
+// directory prefix (the part before the first wildcard) is resolved against
+// base, and any ".." segment counts as reaching out.
+func patternOutside(root, base, pattern string) (string, bool) {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return "", false
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(pattern), "/") {
+		if seg == ".." {
+			return "pattern climbs out of the working directory: " + pattern, true
+		}
+	}
+	prefix := pattern
+	if i := strings.IndexAny(prefix, "*?[{"); i >= 0 {
+		prefix = prefix[:i]
+	}
+	if i := strings.LastIndexAny(prefix, `/\`); i >= 0 {
+		prefix = prefix[:i+1]
+	} else {
+		prefix = ""
+	}
+	dir := base
+	if prefix != "" {
+		if filepath.IsAbs(prefix) {
+			dir = filepath.Clean(prefix)
+		} else {
+			dir = filepath.Join(base, prefix)
+		}
+	}
+	if insideRoot(root, dir) {
+		return "", false
+	}
+	return "outside the working directory: " + dir, true
+}
+
+// credentialReason names why a path is a credential store, or "" if it is not.
+func credentialReason(abs string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	target := canonicalAllowMissing(abs)
+	protected := []struct{ rel, why string }{
+		{".ssh", "ssh keys and config"},
+		{".aws", "cloud credentials"},
+		{".gnupg", "gpg keys"},
+		{".kube", "cluster credentials"},
+		{filepath.Join(".config", "gcloud"), "cloud credentials"},
+		{".azure", "cloud credentials"},
+		{".netrc", "stored logins"},
+		{".git-credentials", "stored logins"},
+		{".npmrc", "registry tokens"},
+		{".pypirc", "registry tokens"},
+		{filepath.Join(".docker", "config.json"), "registry logins"},
+	}
+	for _, pr := range protected {
+		if isUnder(target, canonicalAllowMissing(filepath.Join(home, pr.rel))) {
+			return pr.why + " are off limits to tools"
+		}
+	}
+	if isUnder(target, canonicalAllowMissing(filepath.Dir(config.ConnectionPath()))) {
+		return "tlc's own api key and settings are off limits to tools"
+	}
+	return ""
 }
 
 // relativePath renders p relative to root when it is inside root.

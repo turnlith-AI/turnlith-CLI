@@ -53,7 +53,8 @@ Options:
       --yolo      start in yolo permission mode (no prompts for gated tools)
       --verbose   show token usage after each turn
       --base-url  override the server URL for this run
-      --api-key   override the api key for this run
+      --api-key   override the api key for this run (visible in 'ps'; prefer the environment)
+      --api-key-stdin  with 'tlc configure': read the api key from stdin
 
 Options for ` + "`tlc agents create`" + `:
       --name      codename clients call (default: generated)
@@ -67,7 +68,12 @@ Options for ` + "`tlc install opencode`" + `:
       --no-mcp        skip the turnlith-controller MCP server block
       --use-env       write {env:TLITH_API_KEY} instead of embedding the key
 
-Environment: TLITH_BASE_URL, TLITH_API_KEY (connection), TLC_AGENT (default agent)
+Exit status of -p: 0 ok, 1 the run failed, 2 usage error, 130 interrupted. Piped stdin
+is appended to the prompt.
+
+Environment: TLITH_BASE_URL, TLITH_API_KEY (connection), TLC_AGENT (default agent),
+             TLC_ALLOW_INSECURE=1 (allow plain http to a non-local server),
+             TLC_STREAM_IDLE_TIMEOUT (abandon a silent stream; default 5m, 0 = never)
 
 In the REPL: /help /clear /files /agent /agents /model /effort /status /permissions /verbose /yolo /exit
 @file mentions attach files to a prompt (TAB completes paths); Tab at an empty prompt cycles the permission mode
@@ -82,7 +88,10 @@ type options struct {
 	verbose bool
 	baseURL string
 	apiKey  string
-	prompt  string
+	// apiKeyStdin: `tlc configure --api-key-stdin` reads the key from stdin so
+	// it never appears in the process list or shell history.
+	apiKeyStdin bool
+	prompt      string
 
 	// `tlc agents create`
 	name   string
@@ -228,6 +237,8 @@ func parseArgs(argv []string) (options, error) {
 			opts.baseURL = v
 		case strings.HasPrefix(arg, "--base-url="):
 			opts.baseURL = strings.TrimPrefix(arg, "--base-url=")
+		case arg == "--api-key-stdin":
+			opts.apiKeyStdin = true
 		case arg == "--api-key":
 			v, err := next(&i, arg)
 			if err != nil {
@@ -324,6 +335,10 @@ func newApp(opts options) (*app, error) {
 	}
 	if opts.apiKey != "" {
 		conn.APIKey = strings.TrimSpace(opts.apiKey)
+		warnAPIKeyFlag()
+	}
+	if err := config.ValidateBaseURL(conn.BaseURL); err != nil {
+		return nil, err
 	}
 
 	theme := ui.NewTheme()
@@ -402,7 +417,22 @@ func (a *app) cmdAgents() int {
 	return 0
 }
 
+// warnAPIKeyFlag explains why --api-key is the least safe way to pass a key.
+func warnAPIKeyFlag() {
+	fmt.Fprintln(os.Stderr, "tlc: warning: --api-key is visible to other users in the process list; prefer TLITH_API_KEY, `tlc configure`, or --api-key-stdin")
+}
+
 func runConfigure(opts options) int {
+	if opts.apiKeyStdin {
+		line, err := bufio.NewReader(io.LimitReader(os.Stdin, 64*1024)).ReadString('\n')
+		if err != nil && err != io.EOF {
+			fmt.Fprintf(os.Stderr, "tlc: could not read the api key from stdin: %v\n", err)
+			return 1
+		}
+		opts.apiKey = strings.TrimSpace(line)
+	} else if opts.apiKey != "" {
+		warnAPIKeyFlag()
+	}
 	theme := ui.NewTheme()
 	renderer := ui.NewRenderer(os.Stdout, theme)
 	repl, err := ui.NewREPL(renderer, theme)
@@ -427,6 +457,10 @@ func runConfigure(opts options) int {
 		if strings.TrimSpace(answer) != "" {
 			baseURL = config.NormalizeBaseURL(answer)
 		}
+	}
+	if err := config.ValidateBaseURL(baseURL); err != nil {
+		renderer.Errorf("%s", err)
+		return 2
 	}
 	apiKey := strings.TrimSpace(opts.apiKey)
 	if apiKey == "" {
@@ -483,7 +517,7 @@ func (a *app) runInteractive() int {
 	repl.SetCandidates(a.completeArgument)
 	repl.SetPermissionMode(a.policy.Mode)
 	repl.SetOnTabEmpty(func() {
-		mode := permissions.NextMode(a.policy.Mode)
+		mode := permissions.NextSafeMode(a.policy.Mode)
 		a.policy.Mode = mode
 		repl.SetPermissionMode(mode)
 		repl.WriteAbove(permissionModeLine(a.theme, mode) + "\n")

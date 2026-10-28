@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
+	"github.com/turnlith-AI/turnlith-CLI/internal/config"
 )
 
 // withStdin replaces os.Stdin with a regular file holding content, the way a
@@ -155,4 +156,69 @@ func TestFriendlyErrMessages(t *testing.T) {
 			t.Errorf("%s: query string leaked: %q", c.name, got)
 		}
 	}
+}
+
+func TestPlainHTTPToARemoteHostIsRefused(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("TLITH_BASE_URL", "http://turnlith.example.com")
+	t.Setenv("TLITH_API_KEY", "sk-test-key")
+	t.Setenv("TLC_ALLOW_INSECURE", "")
+
+	res := runTLC(t, t.TempDir(), "-p", "hi")
+	if res.code != 1 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, "plain http")
+	mustContain(t, "stderr", res.stderr, "TLC_ALLOW_INSECURE")
+}
+
+func TestApiKeyFlagWarnsAboutProcessList(t *testing.T) {
+	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
+		return []string{finalChunk(t, "ok", 1, 1)}
+	})
+	setupEnv(t, srv.URL)
+	res := runTLC(t, t.TempDir(), "-p", "--api-key", "sk-from-flag", "hi")
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, "process list")
+	if strings.Contains(res.stderr, "sk-from-flag") || strings.Contains(res.stdout, "sk-from-flag") {
+		t.Fatal("the key must never be echoed")
+	}
+}
+
+func TestConfigureReadsKeyFromStdin(t *testing.T) {
+	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string { return nil })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("TLITH_BASE_URL", "")
+	t.Setenv("TLITH_API_KEY", "")
+	withStdin(t, "sk-piped-key\n")
+
+	res := runTLC(t, t.TempDir(), "configure", "--base-url", srv.URL, "--api-key-stdin")
+	if res.code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", res.code, res.stdout, res.stderr)
+	}
+	conn, err := config.LoadConnection()
+	if err != nil || conn.APIKey != "sk-piped-key" {
+		t.Fatalf("saved connection = %+v err=%v", conn, err)
+	}
+}
+
+func TestConfigureRefusesPlainHTTPRemote(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("TLITH_BASE_URL", "")
+	t.Setenv("TLITH_API_KEY", "")
+	t.Setenv("TLC_ALLOW_INSECURE", "")
+	res := runTLC(t, t.TempDir(), "configure", "--base-url", "http://turnlith.example.com", "--api-key", "sk-x")
+	if res.code == 0 {
+		t.Fatal("configure must refuse plain http to a remote host")
+	}
+	mustContain(t, "stdout", res.stdout, "plain http")
 }

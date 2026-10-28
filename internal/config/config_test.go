@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -116,5 +117,64 @@ func TestPrefsRoundTrip(t *testing.T) {
 	}
 	if filepath.Base(PrefsPath()) != "tlc.json" {
 		t.Fatalf("prefs path = %s", PrefsPath())
+	}
+}
+
+func TestValidateBaseURL(t *testing.T) {
+	t.Setenv(EnvAllowInsecure, "")
+	ok := []string{
+		"https://turnlith.com",
+		"https://example.com:8443/base",
+		"http://localhost:8080",
+		"http://127.0.0.1:3000",
+		"http://127.1.2.3",
+		"http://[::1]:8080",
+		"http://app.localhost:8080",
+	}
+	for _, u := range ok {
+		if err := ValidateBaseURL(u); err != nil {
+			t.Errorf("%s should be accepted: %v", u, err)
+		}
+	}
+	bad := map[string]string{
+		"http://turnlith.com":      "plain http",
+		"http://10.0.0.5:8080":     "plain http",
+		"http://192.168.1.2":       "plain http",
+		"ftp://example.com":        "https",
+		"https://":                 "host",
+		"://nonsense":              "",
+		"http://localhost.evil.io": "plain http",
+	}
+	for u, want := range bad {
+		err := ValidateBaseURL(u)
+		if err == nil {
+			t.Errorf("%s should be refused", u)
+			continue
+		}
+		if want != "" && !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: error %q should mention %q", u, err, want)
+		}
+	}
+}
+
+func TestValidateBaseURLInsecureOverride(t *testing.T) {
+	t.Setenv(EnvAllowInsecure, "1")
+	if err := ValidateBaseURL("http://10.0.0.5:8080"); err != nil {
+		t.Fatalf("override should allow plain http: %v", err)
+	}
+	// the override only relaxes http, never garbage
+	if err := ValidateBaseURL("ftp://example.com"); err == nil {
+		t.Fatal("ftp must stay refused")
+	}
+}
+
+func TestValidateBaseURLErrorNeverEchoesCredentials(t *testing.T) {
+	t.Setenv(EnvAllowInsecure, "")
+	err := ValidateBaseURL("http://user:hunter2@turnlith.com/x?key=sk-abc")
+	if err == nil {
+		t.Fatal("expected refusal")
+	}
+	if strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), "sk-abc") {
+		t.Fatalf("error leaks secrets: %v", err)
 	}
 }

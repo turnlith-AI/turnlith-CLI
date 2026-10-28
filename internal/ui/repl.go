@@ -129,7 +129,7 @@ func (r *REPL) Close() { _ = r.rl.Close() }
 // answers — no Enter: y allow · a always · n deny · x never; Enter allows,
 // Ctrl-C aborts. Platforms without a raw-mode stdin fall back to typing.
 func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
-	r.renderer.PermissionBlock(req.Tool, req.Summary, req.Preview)
+	r.renderer.PermissionBlock(req.Tool, req.Summary, req.Preview, req.Reason)
 	for {
 		if key, ok := readSingleKey(); ok {
 			switch key {

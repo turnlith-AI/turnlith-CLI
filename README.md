@@ -50,13 +50,24 @@ Gated tools consult the session's **permission mode** — `normal`, `auto`, or
 | `yolo`   | everything runs without asking (`--yolo`, `/permissions yolo`) |
 
 Switch with `/permissions [normal|auto|yolo]` (TAB completes the word), press
-`Tab` on an empty prompt to cycle `normal → auto → yolo → normal`, or use
-`--yolo` up front. The prompt shows where you are: `❯` normal, `⏵❯` auto,
+`Tab` on an empty prompt to toggle `normal ⇄ auto` (Tab never enters `yolo` —
+that takes `/permissions yolo` or `--yolo`). The prompt shows where you are: `❯` normal, `⏵❯` auto,
 `⏵⏵❯` yolo. When a call does ask, one keypress answers — `y` allow, `a`
 allow this tool for the session, `n` deny, `x` never this session; Enter
 allows, Ctrl-C aborts. A session rule (always/never) survives mode switches.
-Files must be read before they can be edited, so the model can't
-blind-overwrite work it has never seen.
+Files must be read before they can be edited — and re-read if they changed on
+disk since — so the model can't blind-overwrite work it has never seen or
+clobber your concurrent edits. Edits keep a file's line endings (CRLF stays
+CRLF) and are written atomically.
+
+**The workspace boundary.** `Read`, `Glob`, `Grep`, `Write` and `Edit` work
+freely inside the directory you started `tlc` in. Touching anything outside it
+(`../x`, `/etc/…`, `~/…`, or a symlink that leads out) asks first, in every
+mode except `yolo`, and `auto` mode does not wave such edits through. Credential
+stores — `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, cloud/registry tokens, and
+tlc's own `~/.config/tlith` (your API key) — are blocked outright for these
+tools, even in `yolo`. (`Bash` can still run any command you approve, so read
+what it asks to run.)
 
 ## Install
 
@@ -95,11 +106,16 @@ go run ./cmd/tlc
 ## Configure
 
 ```sh
-tlc configure --base-url http://turnlith.com --api-key sk-…
+tlc configure --base-url https://turnlith.com
 ```
 
-`tlc configure` verifies the server's health endpoint and your key before
-saving. The connection lives in `~/.config/tlith/config.json` (mode 600) —
+`tlc configure` asks for the key without echoing it, verifies the server's
+health endpoint and the key, and only then saves. For scripts, pipe the key in
+(`echo "$KEY" | tlc configure --base-url … --api-key-stdin`) instead of using
+`--api-key`, which other users on the machine can see in the process list. The
+server URL must be `https://`; plain `http://` is accepted only for
+`localhost`/loopback unless you set `TLC_ALLOW_INSECURE=1` for a network you
+trust. The connection lives in `~/.config/tlith/config.json` (mode 600) —
 the same path the retired `tlith` setup helper used, so existing setups keep
 working; one file now serves everything. Chatting needs an **agent-role**
 key; creating agents or switching a model/effort needs an **admin-role** key
@@ -168,7 +184,7 @@ tlc agents create --name bug-hunter --label "Bug hunter" \
 
 | Flag              | Meaning                                                     |
 | ----------------- | ----------------------------------------------------------- |
-| `-p, --print`     | non-interactive; assistant text on stdout, everything else on stderr |
+| `-p, --print`     | non-interactive; assistant text on stdout, everything else on stderr. Exit status `0` ok, `1` the run failed, `130` interrupted. Piped stdin is appended to the prompt: `git diff \| tlc -p "review this"` |
 | `-c, --continue`  | replay the previous local transcript for this directory     |
 | `--agent <name>`  | agent codename (default: last used, or the only agent)      |
 | `--yolo`          | run gated tools without prompting                            |
@@ -196,6 +212,14 @@ model ids, effort levels, permission modes), and `@file` mentions. `/model`
 and `/effort` persist on the agent server-side, so the change applies to
 every client of that agent. `Ctrl-C` interrupts the run in progress; another
 `Ctrl-C` at an empty prompt quits.
+
+**Resilience.** Requests the server rejected before doing any work (HTTP 429,
+502, 503, or a refused connection) are retried three times with backoff,
+honoring `Retry-After`, and the retry is announced. Nothing is re-sent once
+output has started, and a stream that ends before the model finished is
+reported as an error instead of being treated as an answer. A stream that goes
+silent is abandoned after 5 minutes (`TLC_STREAM_IDLE_TIMEOUT`, e.g. `15m`;
+`0` disables). Long `Bash` output keeps both its beginning and its end.
 
 Local transcripts (display-only — the real memory is on the server) are
 JSONL files under `~/.local/share/tlith/tlc/sessions/`, one per session, so

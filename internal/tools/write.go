@@ -34,6 +34,17 @@ func (t *WriteTool) Schema() json.RawMessage {
 
 func (t *WriteTool) Gated() bool { return true }
 
+// NeedsPermission asks before touching files outside the working directory.
+func (t *WriteTool) NeedsPermission(raw json.RawMessage) (string, bool) {
+	var args struct {
+		FilePath string `json:"file_path"`
+	}
+	if decodeArgs(raw, &args) != nil {
+		return "", false
+	}
+	return outsideWorkspace(t.Root, args.FilePath)
+}
+
 func (t *WriteTool) Category() string { return permissions.CategoryEdit }
 
 type writeArgs struct {

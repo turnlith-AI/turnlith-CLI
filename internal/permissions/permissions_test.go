@@ -162,3 +162,67 @@ func TestNoPrompterDenies(t *testing.T) {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
 }
+
+func TestExternalRequestsAreNotWavedThroughByAutoMode(t *testing.T) {
+	p := queuePrompter{answers: []Decision{AllowOnce}}
+	policy := &Policy{Mode: ModeAuto, Prompter: &p}
+	ok, _ := policy.Approve(context.Background(), Request{Tool: "Edit", Category: CategoryEdit, External: true, Reason: "outside the working directory: /etc/hosts"})
+	if !ok || p.asked != 1 {
+		t.Fatalf("auto must still ask for edits outside the workspace: ok=%v asked=%d", ok, p.asked)
+	}
+}
+
+func TestAlwaysForATooldoesNotCoverExternalCalls(t *testing.T) {
+	p := queuePrompter{answers: []Decision{AllowAlways, AllowOnce}}
+	policy := &Policy{Mode: ModeAsk, Prompter: &p}
+	ctx := context.Background()
+
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Read", Category: CategoryRead, External: true}); !ok {
+		t.Fatal("first external Read should be allowed")
+	}
+	// "always" was said about outside-workspace reads; the same again is covered
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Read", Category: CategoryRead, External: true}); !ok || p.asked != 1 {
+		t.Fatalf("repeat external Read should be covered by the rule: asked=%d", p.asked)
+	}
+	// but an ordinary gated call of the same tool still asks
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Read", Category: CategoryRead}); !ok || p.asked != 2 {
+		t.Fatalf("a rule for external calls must not cover internal ones: asked=%d", p.asked)
+	}
+}
+
+func TestInternalAlwaysDoesNotCoverExternalCalls(t *testing.T) {
+	p := queuePrompter{answers: []Decision{AllowAlways, Deny}}
+	policy := &Policy{Mode: ModeAsk, Prompter: &p}
+	ctx := context.Background()
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Edit", Category: CategoryEdit}); !ok {
+		t.Fatal("allow-always expected")
+	}
+	if ok, _ := policy.Approve(ctx, Request{Tool: "Edit", Category: CategoryEdit, External: true}); ok || p.asked != 2 {
+		t.Fatalf("an edit rule must not silently cover files outside the workspace: asked=%d", p.asked)
+	}
+}
+
+func TestYoloStillAllowsExternal(t *testing.T) {
+	policy := &Policy{Mode: ModeYolo}
+	if ok, err := policy.Approve(context.Background(), Request{Tool: "Read", External: true}); err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+}
+
+func TestNextSafeModeNeverReachesYolo(t *testing.T) {
+	// Tab on an empty prompt must not be able to switch every prompt off with
+	// a couple of stray keypresses; yolo needs --yolo or /permissions yolo.
+	m := ModeAsk
+	for i := 0; i < 10; i++ {
+		m = NextSafeMode(m)
+		if m == ModeYolo {
+			t.Fatalf("cycle reached yolo after %d presses", i+1)
+		}
+	}
+	if NextSafeMode(ModeAsk) != ModeAuto || NextSafeMode(ModeAuto) != ModeAsk {
+		t.Fatal("normal and auto should alternate")
+	}
+	if NextSafeMode(ModeYolo) != ModeAsk {
+		t.Fatal("leaving yolo with Tab should land on the safe default")
+	}
+}

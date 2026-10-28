@@ -173,7 +173,7 @@ func humanTokens(n int) string {
 // PermissionBlock renders a gated tool call — a header naming the tool and
 // what it will do, the diff-colored preview, and the answer options — before
 // the REPL reads the one-key answer.
-func (r *Renderer) PermissionBlock(name, summary, preview string) {
+func (r *Renderer) PermissionBlock(name, summary, preview, note string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.lastByte != 0 && r.lastByte != '\n' {
@@ -184,6 +184,9 @@ func (r *Renderer) PermissionBlock(name, summary, preview string) {
 		header += r.Theme.Dim("(" + sanitizeInline(summary) + ")")
 	}
 	r.writeLocked(header + "\n")
+	if note != "" {
+		r.writeLocked("    " + r.Theme.Yellow("⚠ "+sanitizeInline(note)) + "\n")
+	}
 	if preview != "" {
 		for _, line := range strings.Split(sanitizeBlock(preview), "\n") {
 			r.writeLocked("    " + stylePreviewLine(r, line) + "\n")

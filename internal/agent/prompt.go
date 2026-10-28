@@ -70,6 +70,8 @@ Memory: the conversation is stored on the turnlith server and older context is r
 Safety:
 - Never run destructive commands (rm -rf, git reset --hard, force pushes) unless the user explicitly asked.
 - Ask before actions affecting the network, credentials, or files outside the working directory.
+- The file tools refuse credential stores (~/.ssh, ~/.aws, tlc's own config); do not try to get around that with Bash.
+- Command output is shown to you head and tail; when it says "omitted", re-run with a narrower command rather than guessing.
 `)
 	return b.String()
 }

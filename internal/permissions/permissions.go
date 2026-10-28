@@ -34,6 +34,20 @@ type Request struct {
 	Category string // one of the Category* constants
 	Summary  string // one-line description of what will happen
 	Preview  string // optional multi-line detail (e.g. a diff)
+	// External marks a call that reaches outside the working directory. Such
+	// calls are never waved through by auto mode, and an "always" answer is
+	// remembered separately for them. Reason says why, for the prompt.
+	External bool
+	Reason   string
+}
+
+// ruleKey is what session allow/deny answers are remembered under: the tool,
+// split by whether the call stayed inside the workspace.
+func (r Request) ruleKey() string {
+	if r.External {
+		return r.Tool + "@external"
+	}
+	return r.Tool
 }
 
 // Prompter asks the user; implementations live in the UI layer.
@@ -73,6 +87,16 @@ func (m Mode) String() string {
 // NextMode returns the mode after m in cycle order: normal → auto → yolo → normal.
 func NextMode(m Mode) Mode {
 	return modes[(int(m)+1)%len(modes)]
+}
+
+// NextSafeMode is the keyboard cycle (Tab on an empty prompt): it alternates
+// between the modes that still ask about commands and never lands on yolo,
+// which has to be asked for by name. Pressing it in yolo returns to normal.
+func NextSafeMode(m Mode) Mode {
+	if m == ModeAsk {
+		return ModeAuto
+	}
+	return ModeAsk
 }
 
 // Description explains what a mode does, for /status and the banner.
@@ -133,13 +157,14 @@ func (p *Policy) Approve(ctx context.Context, req Request) (bool, error) {
 	if p.Mode == ModeYolo {
 		return true, nil
 	}
-	if p.allowAll != nil && p.allowAll[req.Tool] {
+	key := req.ruleKey()
+	if p.allowAll != nil && p.allowAll[key] {
 		return true, nil
 	}
-	if p.denyAll != nil && p.denyAll[req.Tool] {
+	if p.denyAll != nil && p.denyAll[key] {
 		return false, nil
 	}
-	if p.Mode == ModeAuto && req.Category == CategoryEdit {
+	if p.Mode == ModeAuto && req.Category == CategoryEdit && !req.External {
 		return true, nil
 	}
 	if p.Prompter == nil {
@@ -161,13 +186,13 @@ func (p *Policy) Approve(ctx context.Context, req Request) (bool, error) {
 		if p.allowAll == nil {
 			p.allowAll = map[string]bool{}
 		}
-		p.allowAll[req.Tool] = true
+		p.allowAll[key] = true
 		return true, nil
 	case DenyAlways:
 		if p.denyAll == nil {
 			p.denyAll = map[string]bool{}
 		}
-		p.denyAll[req.Tool] = true
+		p.denyAll[key] = true
 		return false, nil
 	default:
 		return false, nil

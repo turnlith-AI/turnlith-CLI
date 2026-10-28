@@ -126,18 +126,27 @@ func (r *Runner) execute(ctx context.Context, call api.ToolCall, ev Events) (str
 	start := time.Now()
 
 	tool, known := r.Tools.Get(name)
+	// A tool may be free in general yet need a yes for particular arguments
+	// (a Read outside the working directory).
+	var external bool
+	var reason string
+	if g, ok := tool.(tools.ArgGater); known && ok {
+		reason, external = g.NeedsPermission(json.RawMessage(call.Function.Arguments))
+	}
 	var result string
 	denied := false
 	switch {
 	case !known:
 		result = fmt.Sprintf("Error: unknown tool %q — available: %s", name, strings.Join(r.Tools.Names(), ", "))
-	case tool.Gated():
+	case tool.Gated() || external:
 		summary, preview := ui.ToolCallSummary(name, call.Function.Arguments)
 		approved, err := r.Policy.Approve(ctx, permissions.Request{
 			Tool:     name,
 			Category: tool.Category(),
 			Summary:  summary,
 			Preview:  preview,
+			External: external,
+			Reason:   reason,
 		})
 		if err != nil {
 			return "", err
