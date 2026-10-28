@@ -27,6 +27,7 @@ var slashHandlers = map[string]slashHandler{
 	"/status":      (*app).slashStatus,
 	"/verbose":     (*app).slashVerbose,
 	"/files":       (*app).slashFiles,
+	"/init":        (*app).slashInit,
 	"/permissions": (*app).slashPermissions,
 	"/yolo":        (*app).slashYolo,
 }
@@ -193,13 +194,13 @@ func (a *app) slashFiles(_ []string) bool {
 func (a *app) slashPermissions(args []string) bool {
 	switch {
 	case len(args) > 1:
-		a.renderer.Errorf("usage: /permissions [normal|auto|yolo]")
+		a.renderer.Errorf("usage: /permissions [normal|auto|plan|yolo]")
 	case len(args) == 0:
 		a.setPermissionMode(permissions.NextMode(a.policy.Mode))
 	default:
 		mode, ok := permissions.ParseMode(args[0])
 		if !ok {
-			a.renderer.Errorf("unknown permission mode %q — use normal, auto, or yolo", args[0])
+			a.renderer.Errorf("unknown permission mode %q — use normal, auto, plan, or yolo", args[0])
 			return false
 		}
 		a.setPermissionMode(mode)
@@ -228,4 +229,24 @@ func maskKey(key string) string {
 	default:
 		return "…"
 	}
+}
+
+// initPrompt is what /init sends: the agent writes the instruction file the
+// next session will load, from what is actually in the repository.
+const initPrompt = `Analyze this repository and write TLC.md at the project root: the project instructions every future session will load.
+
+Include only what helps an engineer (or agent) work here without asking:
+- the exact commands to build, test, lint and run (verify each against Makefile, package.json, go.mod, CI config and similar; Do not invent commands you did not find)
+- a short map of the important directories and how the pieces fit
+- conventions that are not obvious from the code (naming, error handling, test style, generated files)
+- gotchas and things that must not be changed
+
+Rules: read before you write; keep it under 60 lines, terse, no filler or generic advice. If TLC.md (or AGENTS.md / CLAUDE.md) already exists, improve it in place instead of replacing it wholesale, and keep what is still true.`
+
+func (a *app) slashInit(_ []string) bool {
+	a.runWithCancel(initPrompt)
+	// the file is loaded into the system prompt; pick up what was just written
+	a.loadInstructions(false)
+	a.refreshSystemPrompt()
+	return false
 }

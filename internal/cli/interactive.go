@@ -131,6 +131,8 @@ func permissionModeLine(t *ui.Theme, mode permissions.Mode) string {
 	switch mode {
 	case permissions.ModeAuto:
 		return t.Yellow("⏵ auto — file edits run without asking, Bash still asks")
+	case permissions.ModePlan:
+		return t.Violet("⏸ plan — read-only: the agent can look and plan, not edit or run commands")
 	case permissions.ModeYolo:
 		return t.Red("⏵⏵ yolo — every tool runs without asking")
 	default:

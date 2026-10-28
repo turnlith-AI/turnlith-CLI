@@ -31,7 +31,7 @@ Options:
   -c, --continue  replay the previous local transcript for this directory
       --agent     agent codename (defaults to the saved/last-used choice)
       --yolo      start in yolo permission mode (no prompts for gated tools)
-      --permission-mode  normal|auto|yolo (what asks first; --yolo is shorthand for yolo)
+      --permission-mode  normal|auto|plan|yolo (what asks first; plan is read-only; --yolo = yolo)
       --allowed-tools    permission rules to allow, e.g. "Bash(go test:*),Edit(docs/**)"
       --disallowed-tools permission rules to deny (they win over everything, even --yolo)
       --max-turns        -p: stop (exit 1) after this many model turns
@@ -79,7 +79,7 @@ type options struct {
 	prompt      string
 
 	// permissions and print-mode behavior
-	permissionMode  string   // --permission-mode normal|auto|yolo
+	permissionMode  string   // --permission-mode normal|auto|plan|yolo
 	allowedTools    []string // --allowed-tools, permission rules
 	disallowedTools []string // --disallowed-tools, permission rules
 	maxTurns        int      // --max-turns, 0 = default

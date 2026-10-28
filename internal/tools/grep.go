@@ -53,6 +53,9 @@ func (t *GrepTool) NeedsPermission(raw json.RawMessage) (string, bool) {
 	return outsideWorkspace(t.Root, args.Path)
 }
 
+// ConcurrencySafe: read-only and stateless, so calls may overlap.
+func (t *GrepTool) ConcurrencySafe() bool { return true }
+
 func (t *GrepTool) Category() string { return permissions.CategoryRead }
 
 type grepArgs struct {

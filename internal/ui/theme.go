@@ -90,11 +90,14 @@ const (
 )
 
 // PromptForMode builds the input prompt for a permission mode: plain accent
-// when every gated tool asks, one chevron in auto mode, two in yolo.
+// when every gated tool asks, one chevron in auto mode, a pause bar in plan
+// mode, two chevrons in yolo.
 func PromptForMode(t *Theme, mode permissions.Mode) string {
 	switch mode {
 	case permissions.ModeAuto:
 		return t.Yellow("⏵"+GlyphPrompt) + " "
+	case permissions.ModePlan:
+		return t.Violet("⏸"+GlyphPrompt) + " "
 	case permissions.ModeYolo:
 		return t.Red("⏵⏵"+GlyphPrompt) + " "
 	default:

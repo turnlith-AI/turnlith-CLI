@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
@@ -115,12 +116,90 @@ func (r *Runner) Run(ctx context.Context, prompt string, ev Events) error {
 		if len(turn.ToolCalls) == 0 {
 			return nil
 		}
-		for _, call := range turn.ToolCalls {
-			result, err := r.execute(ctx, call, ev)
-			if err != nil {
-				return err
-			}
-			r.history = append(r.history, api.ToolResultMessage(call.ID, call.Function.Name, result))
+		results, err := r.executeCalls(ctx, turn.ToolCalls, ev)
+		if err != nil {
+			return err
+		}
+		for i, call := range turn.ToolCalls {
+			r.history = append(r.history, api.ToolResultMessage(call.ID, call.Function.Name, results[i]))
+		}
+	}
+}
+
+// maxParallelTools bounds how many read-only calls of one model turn run at
+// once.
+const maxParallelTools = 4
+
+// parallelSafe reports whether a call can be batched: a known tool that
+// declares itself concurrency-safe, needs no permission for these arguments,
+// and so can neither prompt nor change anything.
+func (r *Runner) parallelSafe(call api.ToolCall) bool {
+	tool, ok := r.Tools.Get(call.Function.Name)
+	if !ok || tool.Gated() {
+		return false
+	}
+	if c, ok := tool.(tools.Concurrent); !ok || !c.ConcurrencySafe() {
+		return false
+	}
+	if g, ok := tool.(tools.ArgGater); ok {
+		if _, need := g.NeedsPermission(json.RawMessage(call.Function.Arguments)); need {
+			return false
+		}
+	}
+	return true
+}
+
+// executeCalls runs one model turn's tool calls and returns their results in
+// call order. Runs of adjacent concurrency-safe calls execute side by side;
+// everything else runs one at a time in the order asked, so effects keep their
+// order and permission prompts never overlap.
+func (r *Runner) executeCalls(ctx context.Context, calls []api.ToolCall, ev Events) ([]string, error) {
+	results := make([]string, len(calls))
+	for i := 0; i < len(calls); {
+		j := i
+		for j < len(calls) && r.parallelSafe(calls[j]) {
+			j++
+		}
+		if j-i >= 2 {
+			r.runBatch(ctx, calls[i:j], results[i:j], ev)
+			i = j
+			continue
+		}
+		result, err := r.execute(ctx, calls[i], ev)
+		if err != nil {
+			return nil, err
+		}
+		results[i] = result
+		i++
+	}
+	return results, nil
+}
+
+// runBatch executes safe calls concurrently, then reports them to the UI in
+// order as ordinary start/end pairs (output from overlapping calls would
+// otherwise interleave).
+func (r *Runner) runBatch(ctx context.Context, calls []api.ToolCall, results []string, ev Events) {
+	elapsed := make([]time.Duration, len(calls))
+	sem := make(chan struct{}, maxParallelTools)
+	var wg sync.WaitGroup
+	for i := range calls {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			start := time.Now()
+			results[i] = r.runTool(ctx, calls[i].Function.Name, calls[i].Function.Arguments)
+			elapsed[i] = time.Since(start)
+		}(i)
+	}
+	wg.Wait()
+	for i, call := range calls {
+		if ev.OnToolStart != nil {
+			ev.OnToolStart(call.Function.Name, call.Function.Arguments)
+		}
+		if ev.OnToolEnd != nil {
+			ev.OnToolEnd(call.Function.Name, results[i], false, elapsed[i])
 		}
 	}
 }
@@ -162,7 +241,7 @@ func (r *Runner) execute(ctx context.Context, call api.ToolCall, ev Events) (str
 		}
 		if !approved {
 			denied = true
-			result = permissions.DenialMessage(name)
+			result = r.Policy.DenialFor(name)
 		} else {
 			result = r.runTool(ctx, name, call.Function.Arguments)
 		}

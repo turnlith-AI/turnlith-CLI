@@ -38,6 +38,9 @@ func (t *SearchMemoryTool) Schema() json.RawMessage {
 
 func (t *SearchMemoryTool) Gated() bool { return false }
 
+// ConcurrencySafe: read-only and stateless, so calls may overlap.
+func (t *SearchMemoryTool) ConcurrencySafe() bool { return true }
+
 func (t *SearchMemoryTool) Category() string { return permissions.CategoryMemory }
 
 type memoryArgs struct {

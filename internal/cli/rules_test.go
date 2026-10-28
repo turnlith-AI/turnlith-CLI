@@ -209,3 +209,34 @@ func parseRule(t *testing.T, s string) (permissions.Rule, error) {
 	}
 	return r, nil
 }
+
+func TestPlanModeRefusesChangesButExplainsWhy(t *testing.T) {
+	dir := t.TempDir()
+	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
+		switch turn {
+		case 0:
+			return []string{toolChunk(t, "w", "Write", `{"file_path":"new.txt","content":"x"}`)}
+		case 1:
+			return []string{toolChunk(t, "b", "Bash", `{"command":"echo hi > b.txt"}`)}
+		}
+		return []string{finalChunk(t, "Here is my plan.", 10, 3)}
+	})
+	setupEnv(t, srv.URL)
+	res := runTLC(t, dir, "-p", "--permission-mode", "plan", "--yolo", "implement it")
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	// an explicit --permission-mode wins over the --yolo shorthand
+	for _, f := range []string{"new.txt", "b.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+			t.Fatalf("plan mode created %s", f)
+		}
+	}
+	reqs := srv.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("requests = %d", len(reqs))
+	}
+	mustContain(t, "write result", lastMessage(t, reqs[1]).Content.(string), "Plan mode is on")
+	mustContain(t, "bash result", lastMessage(t, reqs[2]).Content.(string), "Plan mode is on")
+	mustContain(t, "stdout", res.stdout, "Here is my plan.")
+}

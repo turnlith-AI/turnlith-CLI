@@ -89,6 +89,9 @@ func TestParseMode(t *testing.T) {
 		{"YOLO", ModeYolo, true},
 		{" no ", ModeAsk, true},
 		{"y", ModeYolo, true},
+		{"plan", ModePlan, true},
+		{"pl", ModePlan, true},
+		{"p", ModePlan, true},
 		{"au", ModeAuto, true},
 		{"a", ModeAsk, false}, // ambiguous: ask/auto
 		{"", ModeAsk, false},
@@ -103,13 +106,16 @@ func TestParseMode(t *testing.T) {
 }
 
 func TestNextModeCycles(t *testing.T) {
-	if NextMode(ModeAsk) != ModeAuto || NextMode(ModeAuto) != ModeYolo || NextMode(ModeYolo) != ModeAsk {
-		t.Fatal("cycle order must be normal → auto → yolo → normal")
+	order := []Mode{ModeAsk, ModeAuto, ModePlan, ModeYolo, ModeAsk}
+	for i := 0; i+1 < len(order); i++ {
+		if got := NextMode(order[i]); got != order[i+1] {
+			t.Fatalf("NextMode(%v) = %v, want %v (normal → auto → plan → yolo → normal)", order[i], got, order[i+1])
+		}
 	}
 }
 
 func TestModeStrings(t *testing.T) {
-	if ModeAsk.String() != "normal" || ModeAuto.String() != "auto" || ModeYolo.String() != "yolo" {
+	if ModeAsk.String() != "normal" || ModeAuto.String() != "auto" || ModePlan.String() != "plan" || ModeYolo.String() != "yolo" {
 		t.Fatal("mode names must be stable: they are user-facing words")
 	}
 }
@@ -220,8 +226,8 @@ func TestNextSafeModeNeverReachesYolo(t *testing.T) {
 			t.Fatalf("cycle reached yolo after %d presses", i+1)
 		}
 	}
-	if NextSafeMode(ModeAsk) != ModeAuto || NextSafeMode(ModeAuto) != ModeAsk {
-		t.Fatal("normal and auto should alternate")
+	if NextSafeMode(ModeAsk) != ModeAuto || NextSafeMode(ModeAuto) != ModePlan || NextSafeMode(ModePlan) != ModeAsk {
+		t.Fatal("the key cycle is normal → auto → plan → normal")
 	}
 	if NextSafeMode(ModeYolo) != ModeAsk {
 		t.Fatal("leaving yolo with Tab should land on the safe default")

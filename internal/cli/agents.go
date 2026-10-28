@@ -127,7 +127,7 @@ func (a *app) completeArgument(before, prefix string) []string {
 	case "/effort":
 		return matching(effortsFor(a.workspaceModels(false), a.agent.Model), prefix)
 	case "/permissions":
-		return matching([]string{"normal", "auto", "yolo"}, prefix)
+		return matching([]string{"normal", "auto", "plan", "yolo"}, prefix)
 	}
 	return nil
 }

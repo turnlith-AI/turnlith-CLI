@@ -3,6 +3,7 @@ package permissions
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -314,5 +315,92 @@ func TestNeverAnswerDeniesThePrefixNotTheTool(t *testing.T) {
 	}
 	if ok, _ := p.Approve(ctx, req("Bash", "go build")); !ok || q.asked != 2 {
 		t.Fatalf("other commands are unaffected: asked=%d", q.asked)
+	}
+}
+
+func TestPlanModeIsReadOnly(t *testing.T) {
+	q := &queuePrompter{answers: []Decision{AllowOnce, AllowOnce, AllowOnce}}
+	p := &Policy{Mode: ModePlan, Prompter: q}
+	p.AddAllow(Rule{Tool: "Bash", Pattern: "go test:*"}) // user rules do not unlock execution in plan mode
+	p.AddAllow(Rule{Tool: "Edit"})
+	ctx := context.Background()
+
+	for _, r := range []Request{
+		req("Edit", "a.go"),
+		req("Write", "new.go"),
+		req("Bash", "go test ./..."),
+		req("Bash", "rm -rf build"),
+		req("Bash", "git status; make"),
+	} {
+		if ok, _ := p.Approve(ctx, r); ok {
+			t.Errorf("plan mode must refuse %s %q", r.Tool, r.Subject)
+		}
+	}
+	if q.asked != 0 {
+		t.Fatalf("plan mode must refuse silently, not prompt (asked %d)", q.asked)
+	}
+	for _, cmd := range []string{"git status", "git diff HEAD~1", "ls -la", "cd sub && git log --oneline"} {
+		if ok, _ := p.Approve(ctx, req("Bash", cmd)); !ok {
+			t.Errorf("read-only builtin %q should still run in plan mode", cmd)
+		}
+	}
+}
+
+func TestPlanModeDenialExplainsItself(t *testing.T) {
+	p := &Policy{Mode: ModePlan}
+	msg := p.DenialFor("Edit")
+	if !strings.Contains(msg, "plan mode") || !strings.Contains(msg, "plan") {
+		t.Fatalf("message = %q", msg)
+	}
+	normal := &Policy{Mode: ModeAsk}
+	if normal.DenialFor("Edit") != DenialMessage("Edit") {
+		t.Fatal("outside plan mode the standard denial applies")
+	}
+}
+
+func TestDenyRulesStillDenyInPlanMode(t *testing.T) {
+	p, _ := policyWith(t, nil, []string{"Bash(git status:*)"})
+	p.Mode = ModePlan
+	if ok, _ := p.Approve(context.Background(), req("Bash", "git status")); ok {
+		t.Fatal("an explicit deny rule beats the builtin allowlist in every mode")
+	}
+}
+
+type feedbackPrompter struct {
+	queuePrompter
+	feedback string
+}
+
+func (f *feedbackPrompter) TakeFeedback() string {
+	s := f.feedback
+	f.feedback = ""
+	return s
+}
+
+func TestDenialCarriesTheUsersReason(t *testing.T) {
+	fp := &feedbackPrompter{queuePrompter: queuePrompter{answers: []Decision{Deny, Deny}}, feedback: "use the existing helper in util.go instead"}
+	p := &Policy{Mode: ModeAsk, Prompter: fp}
+	if ok, _ := p.Approve(context.Background(), req("Edit", "a.go")); ok {
+		t.Fatal("denied")
+	}
+	msg := p.DenialFor("Edit")
+	if !strings.Contains(msg, "use the existing helper in util.go instead") || !strings.Contains(msg, "denied") {
+		t.Fatalf("message = %q", msg)
+	}
+	// the reason belongs to that denial only
+	if ok, _ := p.Approve(context.Background(), req("Edit", "b.go")); ok {
+		t.Fatal("denied")
+	}
+	if strings.Contains(p.DenialFor("Edit"), "existing helper") {
+		t.Fatal("feedback leaked into a later denial")
+	}
+}
+
+func TestDenialWithoutAReasonIsTheStandardMessage(t *testing.T) {
+	fp := &feedbackPrompter{queuePrompter: queuePrompter{answers: []Decision{Deny}}}
+	p := &Policy{Mode: ModeAsk, Prompter: fp}
+	p.Approve(context.Background(), req("Edit", "a.go"))
+	if p.DenialFor("Edit") != DenialMessage("Edit") {
+		t.Fatalf("got %q", p.DenialFor("Edit"))
 	}
 }

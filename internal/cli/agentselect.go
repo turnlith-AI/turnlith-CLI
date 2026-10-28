@@ -5,7 +5,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/turnlith-AI/turnlith-CLI/internal/agent"
 	"github.com/turnlith-AI/turnlith-CLI/internal/config"
 )
 
@@ -68,12 +67,7 @@ func (a *app) setAgentByName(name string, remember bool) error {
 			changed := a.agent.Codename != ag.Codename
 			a.agent = ag
 			a.runner.SetAgent(ag.Codename)
-			a.runner.SystemPrompt = agent.SystemPrompt(agent.PromptEnv{
-				Cwd:           a.cwd,
-				Agent:         ag.Codename,
-				Model:         ag.Model,
-				HasMemoryTool: true,
-			})
+			a.refreshSystemPrompt()
 			if remember {
 				prefs := config.LoadPrefs()
 				prefs.DefaultAgent = ag.Codename

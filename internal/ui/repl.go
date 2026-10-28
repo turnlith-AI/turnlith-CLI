@@ -31,6 +31,10 @@ type REPL struct {
 	// codenames, model ids, effort levels, @file mentions); nil completes
 	// command names only.
 	candidates func(before, prefix string) []string
+	// feedback is the reason typed after the latest denied prompt (see
+	// TakeFeedback); modePrompt is the prompt to restore after a temporary one.
+	feedback   string
+	modePrompt string
 	// onTabEmpty runs when Tab is pressed on an empty line (readline has no
 	// candidates then, so Tab is free); the app cycles the permission mode.
 	onTabEmpty func()
@@ -44,7 +48,8 @@ func (r *REPL) SetOnTabEmpty(fn func()) { r.onTabEmpty = fn }
 
 // SetPermissionMode restyles the input prompt to reflect the mode.
 func (r *REPL) SetPermissionMode(mode permissions.Mode) {
-	r.rl.SetPrompt(PromptForMode(r.theme, mode))
+	r.modePrompt = PromptForMode(r.theme, mode)
+	r.rl.SetPrompt(r.modePrompt)
 }
 
 // WriteAbove prints text above the input line; it goes through readline's
@@ -64,11 +69,14 @@ func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 	// while reading a line, after NewEx returned, so the late assignment is safe.
 	var instance *readline.Instance
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          PromptForMode(theme, permissions.ModeAsk),
-		HistoryFile:     filepath.Join(config.StateDir(), "history"),
-		HistoryLimit:    1000,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
+		Prompt: PromptForMode(theme, permissions.ModeAsk),
+		// history is saved by hand in Readline so private answers (a denial
+		// reason) stay out of the up-arrow history
+		DisableAutoSaveHistory: true,
+		HistoryFile:            filepath.Join(config.StateDir(), "history"),
+		HistoryLimit:           1000,
+		InterruptPrompt:        "^C",
+		EOFPrompt:              "exit",
 		AutoComplete: completer{extra: func(before, prefix string) []string {
 			if r.candidates == nil {
 				return nil
@@ -100,6 +108,7 @@ func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 		return nil, err
 	}
 	r.rl = rl
+	r.modePrompt = PromptForMode(theme, permissions.ModeAsk)
 	instance = rl
 	return r, nil
 }
@@ -110,6 +119,9 @@ var ErrInterrupt = readline.ErrInterrupt
 // Readline reads one input line; ErrInterrupt on Ctrl-C, io.EOF on Ctrl-D.
 func (r *REPL) Readline() (string, error) {
 	line, err := r.rl.Readline()
+	if err == nil && strings.TrimSpace(line) != "" {
+		_ = r.rl.SaveToHistory(line) // single-line form, placeholders intact
+	}
 	line = strings.ReplaceAll(line, string(newlinePlaceholder), "\n")
 	return line, err
 }
@@ -159,6 +171,7 @@ func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
 				}
 			case "n", "esc":
 				r.echoAnswer("n deny")
+				r.askReason()
 				return permissions.Deny, nil
 			case "x":
 				if view.Remember {
@@ -191,6 +204,7 @@ func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
 				return permissions.AllowProject, nil
 			}
 		case "n", "no":
+			r.askReason()
 			return permissions.Deny, nil
 		case "x", "never":
 			if view.Remember {
@@ -199,6 +213,28 @@ func (r *REPL) Prompt(req permissions.Request) (permissions.Decision, error) {
 		}
 		r.renderer.Infof("%s", r.theme.Dim("please answer with one of the letters shown"))
 	}
+}
+
+// askReason offers a one-line explanation after a denial; the model gets it
+// with the refusal ("use the helper in util.go instead"). Enter skips it, and
+// the text never enters the input history.
+func (r *REPL) askReason() {
+	r.feedback = ""
+	r.rl.SetPrompt("  " + r.theme.Dim("why not? (optional, Enter to skip) › "))
+	line, err := r.rl.Readline()
+	r.rl.SetPrompt(r.modePrompt)
+	if err != nil {
+		return // Ctrl-C or EOF: no reason, the denial stands
+	}
+	r.feedback = strings.TrimSpace(strings.ReplaceAll(line, string(newlinePlaceholder), " "))
+}
+
+// TakeFeedback implements permissions.FeedbackTaker: the reason typed for the
+// most recent denial, cleared once read.
+func (r *REPL) TakeFeedback() string {
+	s := r.feedback
+	r.feedback = ""
+	return s
 }
 
 // echoAnswer shows the chosen answer under the permission block (raw mode

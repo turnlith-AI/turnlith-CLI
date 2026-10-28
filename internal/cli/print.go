@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/turnlith-AI/turnlith-CLI/internal/agent"
 	"github.com/turnlith-AI/turnlith-CLI/internal/history"
 	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 	"github.com/turnlith-AI/turnlith-CLI/internal/ui"
@@ -55,7 +57,24 @@ func (a *app) runPrint() int {
 	}()
 
 	wire := a.attachMentions(prompt, a.errRenderer)
-	err := a.runPrompt(ctx, prompt, wire, a.renderer, a.errRenderer)
+
+	// json and stream-json reserve stdout for machine-readable output: the
+	// human renderer writes to nowhere and results go through the encoder.
+	out := a.renderer
+	var enc *json.Encoder
+	if f := a.opts.outputFormat; f == "json" || f == "stream-json" {
+		out = ui.NewRenderer(io.Discard, &ui.Theme{})
+		enc = json.NewEncoder(os.Stdout)
+		enc.SetEscapeHTML(false)
+		if f == "stream-json" {
+			a.onEvent = func(ev map[string]any) { _ = enc.Encode(ev) }
+		}
+	}
+
+	err := a.runPrompt(ctx, prompt, wire, out, a.errRenderer)
+	if enc != nil {
+		_ = enc.Encode(a.resultEvent(err))
+	}
 	switch {
 	case err == nil:
 		return 0
@@ -64,6 +83,36 @@ func (a *app) runPrint() int {
 	default:
 		return 1
 	}
+}
+
+// resultEvent is the final object of --output-format json and stream-json.
+func (a *app) resultEvent(runErr error) map[string]any {
+	ev := map[string]any{
+		"type":       "result",
+		"is_error":   runErr != nil,
+		"result":     a.stats.lastText,
+		"agent":      a.agent.Codename,
+		"turns":      a.stats.turns,
+		"tool_calls": a.stats.toolCalls,
+		"usage": map[string]any{
+			"context_tokens": a.stats.contextTokens,
+			"output_tokens":  a.stats.outputTokens,
+		},
+	}
+	switch {
+	case runErr == nil:
+		ev["subtype"] = "success"
+	case errors.Is(runErr, context.Canceled), errors.Is(runErr, permissions.ErrAborted):
+		ev["subtype"], ev["error"] = "interrupted", "interrupted"
+	case errors.Is(runErr, agent.ErrStepLimit):
+		ev["subtype"], ev["error"] = "max_turns", runErr.Error()
+	default:
+		ev["subtype"], ev["error"] = "error", friendlyErr(runErr)
+	}
+	if a.transcript != nil {
+		ev["transcript"] = a.transcript.Path
+	}
+	return ev
 }
 
 // exitInterrupted is the conventional shell status for SIGINT (128 + 2).

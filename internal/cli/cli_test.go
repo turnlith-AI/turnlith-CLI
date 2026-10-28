@@ -515,7 +515,7 @@ func TestPrintModeStreamsAssistantText(t *testing.T) {
 	for _, def := range req.Tools {
 		names[def.Function.Name] = true
 	}
-	for _, want := range []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "SearchMemory"} {
+	for _, want := range []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "SearchMemory", "TodoWrite"} {
 		if !names[want] {
 			t.Errorf("tool %s not offered to the model", want)
 		}
@@ -1009,7 +1009,7 @@ func TestCompleteArgumentOffersWorkspaceWords(t *testing.T) {
 		t.Fatalf("effort completion = %v", got)
 	}
 	got = a.completeArgument("/permissions", "")
-	if len(got) != 3 || got[0] != "normal" || got[1] != "auto" || got[2] != "yolo" {
+	if len(got) != 4 || got[0] != "normal" || got[1] != "auto" || got[2] != "plan" || got[3] != "yolo" {
 		t.Fatalf("permission mode completion = %v", got)
 	}
 	got = a.completeArgument("/permissions", "y")
@@ -1021,10 +1021,14 @@ func TestCompleteArgumentOffersWorkspaceWords(t *testing.T) {
 func TestPermissionsCommandSetsCyclesAndCovers(t *testing.T) {
 	a, out := testApp(t, "http://127.0.0.1:1", testAgents())
 
-	// no argument cycles normal → auto → yolo → normal
+	// no argument cycles normal → auto → plan → yolo → normal
 	a.handleSlash("/permissions")
 	if a.policy.Mode != permissions.ModeAuto {
 		t.Fatalf("mode = %v, want auto", a.policy.Mode)
+	}
+	a.handleSlash("/permissions")
+	if a.policy.Mode != permissions.ModePlan {
+		t.Fatalf("mode = %v, want plan", a.policy.Mode)
 	}
 	a.handleSlash("/permissions")
 	if a.policy.Mode != permissions.ModeYolo {

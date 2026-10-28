@@ -56,6 +56,9 @@ func (t *GlobTool) NeedsPermission(raw json.RawMessage) (string, bool) {
 	return patternOutside(t.Root, base, args.Pattern)
 }
 
+// ConcurrencySafe: read-only and stateless, so calls may overlap.
+func (t *GlobTool) ConcurrencySafe() bool { return true }
+
 func (t *GlobTool) Category() string { return permissions.CategoryRead }
 
 type globArgs struct {

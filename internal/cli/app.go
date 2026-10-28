@@ -44,6 +44,14 @@ type app struct {
 	transcript *history.Session
 	verbose    bool
 
+	// stats and onEvent serve --output-format: what the last run did, and the
+	// sink for stream-json events (nil in every other mode).
+	stats   runStats
+	onEvent func(map[string]any)
+
+	// instructions are the TLC.md / AGENTS.md / CLAUDE.md files in the system prompt.
+	instructions []agent.Instructions
+
 	// notes are one-time startup messages (rules loaded or refused), shown
 	// under the banner or on stderr in print mode.
 	notes []string
@@ -74,7 +82,7 @@ func (a *app) setupPermissions() error {
 	case a.opts.permissionMode != "":
 		m, ok := permissions.ParseMode(a.opts.permissionMode)
 		if !ok {
-			return &usageError{fmt.Sprintf("--permission-mode must be normal, auto, or yolo, got %q", a.opts.permissionMode)}
+			return &usageError{fmt.Sprintf("--permission-mode must be normal, auto, plan, or yolo, got %q", a.opts.permissionMode)}
 		}
 		mode = m
 	case a.opts.yolo:
@@ -184,6 +192,7 @@ func newApp(opts options) (*app, error) {
 		&tools.GlobTool{Root: cwd},
 		&tools.GrepTool{Root: cwd},
 		&tools.SearchMemoryTool{Client: a.client, Agent: func() string { return a.agent.Codename }},
+		&tools.TodoTool{},
 	)
 	a.policy = &permissions.Policy{}
 	a.root = config.FindProjectRoot(cwd)
@@ -197,6 +206,7 @@ func newApp(opts options) (*app, error) {
 	if err := a.setupPermissions(); err != nil {
 		return nil, err
 	}
+	a.loadInstructions(true)
 	return a, nil
 }
 
@@ -231,4 +241,31 @@ func shortPath(p string) string {
 		return "~" + strings.TrimPrefix(p, home)
 	}
 	return p
+}
+
+// loadInstructions (re)reads the instruction files. announce adds a startup
+// note naming each one, so it is never a surprise what the model was told.
+func (a *app) loadInstructions(announce bool) {
+	a.instructions = agent.LoadInstructions(a.cwd, agent.InstructionsMaxFromEnv())
+	if !announce {
+		return
+	}
+	for _, in := range a.instructions {
+		note := fmt.Sprintf("instructions: %s (%s)", shortPath(in.Path), humanSize(len(in.Text)))
+		if in.Truncated {
+			note += " — truncated to fit; raise " + agent.EnvInstructionsMax + " or trim the file"
+		}
+		a.notes = append(a.notes, note)
+	}
+}
+
+// refreshSystemPrompt rebuilds the system prompt for the current agent.
+func (a *app) refreshSystemPrompt() {
+	a.runner.SystemPrompt = agent.SystemPrompt(agent.PromptEnv{
+		Cwd:           a.cwd,
+		Agent:         a.agent.Codename,
+		Model:         a.agent.Model,
+		HasMemoryTool: true,
+		Instructions:  a.instructions,
+	})
 }

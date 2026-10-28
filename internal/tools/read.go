@@ -44,6 +44,9 @@ func (t *ReadTool) NeedsPermission(raw json.RawMessage) (string, bool) {
 	return outsideWorkspace(t.Root, args.FilePath)
 }
 
+// ConcurrencySafe: read-only and stateless, so calls may overlap.
+func (t *ReadTool) ConcurrencySafe() bool { return true }
+
 func (t *ReadTool) Category() string { return permissions.CategoryRead }
 
 const (

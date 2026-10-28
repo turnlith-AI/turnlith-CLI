@@ -38,6 +38,13 @@ type ArgGater interface {
 	NeedsPermission(args json.RawMessage) (reason string, need bool)
 }
 
+// Concurrent marks tools whose calls are safe to run side by side with other
+// calls in the same model turn: no shared mutable state, no effect on the
+// workspace. The agent loop batches adjacent such calls.
+type Concurrent interface {
+	ConcurrencySafe() bool
+}
+
 // Registry holds the active tool set.
 type Registry struct {
 	list   []Tool

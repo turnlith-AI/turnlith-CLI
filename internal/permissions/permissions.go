@@ -66,17 +66,22 @@ const (
 	ModeAsk Mode = iota
 	// ModeAuto runs file edits (Write, Edit) without asking; Bash still asks.
 	ModeAuto
+	// ModePlan is read-only: the agent can look around and plan, but edits
+	// and commands are refused (read-only builtins like git status still run).
+	ModePlan
 	// ModeYolo runs every gated tool without asking.
 	ModeYolo
 )
 
 // modes lists the words /permissions accepts, in cycle order.
-var modes = []Mode{ModeAsk, ModeAuto, ModeYolo}
+var modes = []Mode{ModeAsk, ModeAuto, ModePlan, ModeYolo}
 
 func (m Mode) String() string {
 	switch m {
 	case ModeAuto:
 		return "auto"
+	case ModePlan:
+		return "plan"
 	case ModeYolo:
 		return "yolo"
 	default:
@@ -84,19 +89,24 @@ func (m Mode) String() string {
 	}
 }
 
-// NextMode returns the mode after m in cycle order: normal → auto → yolo → normal.
+// NextMode returns the mode after m in cycle order: normal → auto → plan →
+// yolo → normal.
 func NextMode(m Mode) Mode {
 	return modes[(int(m)+1)%len(modes)]
 }
 
-// NextSafeMode is the keyboard cycle (Tab on an empty prompt): it alternates
-// between the modes that still ask about commands and never lands on yolo,
-// which has to be asked for by name. Pressing it in yolo returns to normal.
+// NextSafeMode is the keyboard cycle (Tab on an empty prompt): normal → auto
+// → plan → normal. It never lands on yolo, which has to be asked for by name;
+// pressing it in yolo returns to normal.
 func NextSafeMode(m Mode) Mode {
-	if m == ModeAsk {
+	switch m {
+	case ModeAsk:
 		return ModeAuto
+	case ModeAuto:
+		return ModePlan
+	default:
+		return ModeAsk
 	}
-	return ModeAsk
 }
 
 // Description explains what a mode does, for /status and the banner.
@@ -104,6 +114,8 @@ func (m Mode) Description() string {
 	switch m {
 	case ModeAuto:
 		return "auto — Write/Edit run without asking, Bash still asks"
+	case ModePlan:
+		return "plan — read-only: the agent can look and plan, not edit or run commands"
 	case ModeYolo:
 		return "yolo — no prompts, every tool runs"
 	default:
@@ -139,6 +151,13 @@ func ParseMode(s string) (Mode, bool) {
 	return match, found
 }
 
+// FeedbackTaker is implemented by prompters that can collect a reason along
+// with a denial ("use the helper in util.go instead"). TakeFeedback returns
+// and clears the reason given for the most recent denial.
+type FeedbackTaker interface {
+	TakeFeedback() string
+}
+
 // RuleStore persists "always allow in this project" answers.
 type RuleStore interface {
 	SaveAllow(rule Rule) error
@@ -155,6 +174,10 @@ type Policy struct {
 
 	allow []Rule
 	deny  []Rule
+
+	// feedback is the user's reason for the latest denial, handed to the
+	// model by DenialFor.
+	feedback string
 }
 
 // AddAllow and AddDeny register rules (from settings, flags, or answers).
@@ -236,6 +259,45 @@ func (p *Policy) allowed(req Request) bool {
 	return true
 }
 
+func (p *Policy) takeFeedback() {
+	p.feedback = ""
+	if ft, ok := p.Prompter.(FeedbackTaker); ok {
+		p.feedback = strings.TrimSpace(ft.TakeFeedback())
+	}
+}
+
+// planAllows is plan mode's whole policy: nothing that changes anything.
+// Gated tools are refused outright; the only Bash that runs is the read-only
+// builtin set, whatever allow rules the user has.
+func planAllows(req Request) bool {
+	if req.Tool != "Bash" || req.External {
+		return false
+	}
+	segs, safe := splitCommand(req.Subject)
+	if !safe || len(segs) == 0 {
+		return false
+	}
+	for _, seg := range segs {
+		if !builtinReadOnly(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+// DenialFor is the tool result handed to the model when a call is refused:
+// in plan mode it explains the mode instead of implying the user said no.
+func (p *Policy) DenialFor(tool string) string {
+	if p.Mode == ModePlan {
+		return fmt.Sprintf("Plan mode is on: %s was not run. You may read, search and run read-only git commands, but not change files or run other commands. Finish by presenting your plan to the user; they will switch out of plan mode to let you carry it out.", tool)
+	}
+	if fb := p.feedback; fb != "" {
+		p.feedback = ""
+		return fmt.Sprintf("The user denied permission to run %s and said: %q. Follow that guidance instead of retrying the same call; if it is unclear, ask the user.", tool, fb)
+	}
+	return DenialMessage(tool)
+}
+
 // sessionRule is the rule an "always"/"never" answer records: the suggested
 // one, or for outside-the-workspace calls a tool-wide rule scoped to those.
 func sessionRule(req Request) *Rule {
@@ -254,6 +316,9 @@ func sessionRule(req Request) *Rule {
 func (p *Policy) Approve(ctx context.Context, req Request) (bool, error) {
 	if p.denied(req) {
 		return false, nil
+	}
+	if p.Mode == ModePlan {
+		return planAllows(req), nil
 	}
 	if p.Mode == ModeYolo {
 		return true, nil
@@ -291,8 +356,10 @@ func (p *Policy) Approve(ctx context.Context, req Request) (bool, error) {
 		if rule := sessionRule(req); rule != nil {
 			p.AddDeny(*rule)
 		}
+		p.takeFeedback()
 		return false, nil
 	default:
+		p.takeFeedback()
 		return false, nil
 	}
 }

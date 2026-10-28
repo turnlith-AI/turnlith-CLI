@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/agent"
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
@@ -13,11 +15,36 @@ import (
 	"github.com/turnlith-AI/turnlith-CLI/internal/ui"
 )
 
+// runStats is what the last run did, for the --output-format result object.
+type runStats struct {
+	lastText      string // text of the final model turn: the answer
+	turns         int
+	toolCalls     int
+	contextTokens int // context size of the latest turn
+	outputTokens  int // generated tokens across all turns
+}
+
+// emit sends a machine-readable event (stream-json mode); a no-op otherwise.
+func (a *app) emit(ev map[string]any) {
+	if a.onEvent != nil {
+		a.onEvent(ev)
+	}
+}
+
+// rawOrString embeds tool arguments as JSON when they parse, as text if not.
+func rawOrString(raw string) any {
+	if json.Valid([]byte(raw)) && strings.TrimSpace(raw) != "" {
+		return json.RawMessage(raw)
+	}
+	return raw
+}
+
 // runPrompt runs one prompt to completion, reporting problems on activity. It
 // returns the run's error (already reported) so print mode can pick an exit
 // code; the interactive loop ignores it and prompts again.
 func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity *ui.Renderer) error {
 	a.transcript.Append("user", display)
+	a.stats = runStats{}
 
 	var turnText strings.Builder
 	var spinner *ui.Spinner
@@ -47,9 +74,11 @@ func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity
 			stopSpinner()
 			out.Text(delta)
 			turnText.WriteString(delta)
+			a.emit(map[string]any{"type": "text", "delta": delta})
 		},
 		OnTurnEnd: func() {
 			out.EndText()
+			a.stats.lastText = turnText.String()
 			if turnText.Len() > 0 {
 				a.transcript.Append("assistant", turnText.String())
 				turnText.Reset()
@@ -59,6 +88,8 @@ func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity
 			stopSpinner()
 			summary, _ := ui.ToolCallSummary(name, rawArgs)
 			activity.ToolStart(name, summary)
+			a.stats.toolCalls++
+			a.emit(map[string]any{"type": "tool_use", "name": name, "input": rawOrString(rawArgs)})
 		},
 		OnToolExec: func(name string) {
 			// only slow tools earn a spinner; quick reads never flash one
@@ -67,13 +98,22 @@ func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity
 		OnToolEnd: func(name, result string, denied bool, elapsed time.Duration) {
 			stopSpinner()
 			activity.ToolResult(result, denied, elapsed)
+			a.emit(map[string]any{
+				"type": "tool_result", "name": name, "denied": denied,
+				"is_error": denied || strings.HasPrefix(result, "Error:"),
+				"content":  truncateForEvent(result),
+			})
 			startSpinner("thinking…", 0)
 		},
 		OnNotice: func(msg string) {
 			stopSpinner()
 			activity.Notice(msg)
+			a.emit(map[string]any{"type": "notice", "message": msg})
 		},
 		OnUsage: func(u api.Usage) {
+			a.stats.turns++
+			a.stats.contextTokens = u.PromptTokens
+			a.stats.outputTokens += u.CompletionTokens
 			if a.verbose {
 				activity.UsageLine(u.PromptTokens, u.CompletionTokens)
 			}
@@ -96,4 +136,17 @@ func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity
 		activity.Errorf("%s", friendlyErr(err))
 	}
 	return err
+}
+
+// truncateForEvent bounds a tool result embedded in a stream-json event.
+func truncateForEvent(s string) string {
+	const max = 4000
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

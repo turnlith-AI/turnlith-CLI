@@ -76,6 +76,13 @@ func ToolCallSummary(name, rawArgs string) (summary, preview string) {
 			summary += " in " + p
 		}
 		return summary, ""
+	case "TodoWrite":
+		var list struct {
+			Todos []json.RawMessage `json:"todos"`
+		}
+		_ = json.Unmarshal([]byte(rawArgs), &list)
+		summary = fmt.Sprintf("%d items", len(list.Todos))
+		return summary, ""
 	case "SearchMemory":
 		summary = str("query")
 		if s := str("scope"); s != "" && s != "all" {

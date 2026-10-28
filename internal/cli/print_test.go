@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -221,4 +222,43 @@ func TestConfigureRefusesPlainHTTPRemote(t *testing.T) {
 		t.Fatal("configure must refuse plain http to a remote host")
 	}
 	mustContain(t, "stdout", res.stdout, "plain http")
+}
+
+func TestProjectInstructionsReachTheSystemPrompt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("Always run `make check` before finishing.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
+		return []string{finalChunk(t, "ok", 10, 1)}
+	})
+	setupEnv(t, srv.URL)
+
+	res := runTLC(t, dir, "-p", "hi")
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	system, _ := srv.requests()[0].Messages[0].Content.(string)
+	mustContain(t, "system prompt", system, "Always run `make check` before finishing.")
+	mustContain(t, "system prompt", system, "AGENTS.md")
+	mustContain(t, "stderr", res.stderr, "AGENTS.md")
+
+	t.Setenv("TLC_INSTRUCTIONS_MAX", "0")
+	res = runTLC(t, dir, "-p", "hi again")
+	system, _ = srv.requests()[1].Messages[0].Content.(string)
+	if strings.Contains(system, "make check") {
+		t.Fatal("TLC_INSTRUCTIONS_MAX=0 must disable instruction loading")
+	}
+}
+
+func TestInitCommandAsksTheAgentToWriteInstructions(t *testing.T) {
+	if _, ok := slashHandlers["/init"]; !ok {
+		t.Fatal("/init is not registered")
+	}
+	if !strings.Contains(initPrompt, "TLC.md") || !strings.Contains(initPrompt, "Do not invent") {
+		t.Fatalf("init prompt should name the file and forbid invented commands:\n%s", initPrompt)
+	}
 }
