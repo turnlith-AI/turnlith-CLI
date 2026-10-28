@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -83,27 +85,49 @@ type FileActivity struct {
 	Touched time.Time
 }
 
+// fileStamp is what a file looked like when the model last saw it.
+type fileStamp struct {
+	mtime time.Time
+	size  int64
+}
+
 // Tracker remembers which files the session has read, so Write/Edit can
-// refuse to modify files the model has never seen — and which files it has
-// read, written, or edited, for /files and the file browser.
+// refuse to modify files the model has never seen — or has not seen since they
+// changed on disk — and which files it has read, written, or edited, for
+// /files and the file browser. Entries are keyed by the symlink-resolved path,
+// so a file read through a link and edited through its target is one file.
 type Tracker struct {
 	mu    sync.Mutex
-	read  map[string]bool
+	read  map[string]fileStamp
 	files map[string]*FileActivity
 }
 
 func NewTracker() *Tracker {
-	return &Tracker{read: map[string]bool{}, files: map[string]*FileActivity{}}
+	return &Tracker{read: map[string]fileStamp{}, files: map[string]*FileActivity{}}
+}
+
+// canonicalPath cleans p and resolves symlinks when the path exists.
+func canonicalPath(p string) string {
+	p = filepath.Clean(p)
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real
+	}
+	return p
 }
 
 func (t *Tracker) mark(path string, mark func(*FileActivity)) {
+	key := canonicalPath(path)
+	var stamp fileStamp
+	if info, err := os.Stat(key); err == nil {
+		stamp = fileStamp{mtime: info.ModTime(), size: info.Size()}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.read[path] = true
-	f := t.files[path]
+	t.read[key] = stamp
+	f := t.files[key]
 	if f == nil {
 		f = &FileActivity{Path: path}
-		t.files[path] = f
+		t.files[key] = f
 	}
 	mark(f)
 	f.Touched = time.Now()
@@ -126,9 +150,30 @@ func (t *Tracker) MarkEdited(path string) {
 }
 
 func (t *Tracker) WasRead(path string) bool {
+	key := canonicalPath(path)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.read[path]
+	_, ok := t.read[key]
+	return ok
+}
+
+// Stale reports whether a file the session has seen was modified on disk
+// since — by an editor, a formatter, git — so an edit built on the old
+// contents would clobber it. Unknown or vanished files are not stale; the
+// tool reports those errors itself.
+func (t *Tracker) Stale(path string) bool {
+	key := canonicalPath(path)
+	t.mu.Lock()
+	stamp, ok := t.read[key]
+	t.mu.Unlock()
+	if !ok {
+		return false
+	}
+	info, err := os.Stat(key)
+	if err != nil {
+		return false
+	}
+	return !info.ModTime().Equal(stamp.mtime) || info.Size() != stamp.size
 }
 
 // Files returns the session's file activity, most recently touched first.

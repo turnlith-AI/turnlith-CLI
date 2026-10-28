@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
 )
@@ -51,6 +52,7 @@ func (t *WriteTool) Run(ctx context.Context, raw json.RawMessage) (string, error
 	}
 
 	mode := os.FileMode(0o644)
+	content := args.Content
 	if info, err := os.Stat(path); err == nil {
 		if info.IsDir() {
 			return "", fmt.Errorf("%s is a directory", path)
@@ -58,13 +60,20 @@ func (t *WriteTool) Run(ctx context.Context, raw json.RawMessage) (string, error
 		if !t.Tracker.WasRead(path) {
 			return "", fmt.Errorf("%s already exists and has not been read in this session — read it first, or use Edit for targeted changes", path)
 		}
+		if t.Tracker.Stale(path) {
+			return "", fmt.Errorf("%s has changed on disk since it was read — read it again before overwriting it", path)
+		}
 		mode = info.Mode().Perm()
+		// keep a CRLF file CRLF: the model only ever saw it with plain newlines
+		if existing, err := os.ReadFile(path); err == nil && isPureCRLF(string(existing)) && !strings.Contains(content, "\r") {
+			content = toCRLF(content)
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("cannot create parent directories for %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, []byte(args.Content), mode); err != nil {
+	if err := writeFileAtomic(path, []byte(content), mode); err != nil {
 		return "", fmt.Errorf("cannot write %s: %w", path, err)
 	}
 	t.Tracker.MarkWritten(path)

@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -663,10 +664,13 @@ func (a *app) runWithCancel(prompt string) {
 		signal.Stop(sigCh)
 		close(done)
 	}()
-	a.runPrompt(ctx, prompt, wire, a.renderer, a.renderer)
+	_ = a.runPrompt(ctx, prompt, wire, a.renderer, a.renderer)
 }
 
-func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity *ui.Renderer) {
+// runPrompt runs one prompt to completion, reporting problems on activity. It
+// returns the run's error (already reported) so print mode can pick an exit
+// code; the interactive loop ignores it and prompts again.
+func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity *ui.Renderer) error {
 	a.transcript.Append("user", display)
 
 	var turnText strings.Builder
@@ -722,6 +726,7 @@ func (a *app) runPrompt(ctx context.Context, display, wire string, out, activity
 	default:
 		activity.Errorf("%s", friendlyErr(err))
 	}
+	return err
 }
 
 // handleSlash processes a REPL command; it returns true to exit.
@@ -821,12 +826,11 @@ func (a *app) handleSlash(line string) bool {
 
 func (a *app) runPrint() int {
 	prompt := a.opts.prompt
-	if prompt == "" {
-		if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice == 0 {
-			data, err := io.ReadAll(io.LimitReader(os.Stdin, 4*1024*1024))
-			if err == nil {
-				prompt = strings.TrimSpace(string(data))
-			}
+	if piped, ok := readPipedStdin(prompt != ""); ok {
+		if prompt == "" {
+			prompt = piped
+		} else if piped != "" {
+			prompt += "\n\n<stdin>\n" + piped + "\n</stdin>"
 		}
 	}
 	if prompt == "" {
@@ -857,8 +861,63 @@ func (a *app) runPrint() int {
 	}()
 
 	wire := a.attachMentions(prompt, a.errRenderer)
-	a.runPrompt(ctx, prompt, wire, a.renderer, a.errRenderer)
-	return 0
+	err := a.runPrompt(ctx, prompt, wire, a.renderer, a.errRenderer)
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, context.Canceled), errors.Is(err, permissions.ErrAborted):
+		return exitInterrupted
+	default:
+		return 1
+	}
+}
+
+// exitInterrupted is the conventional shell status for SIGINT (128 + 2).
+const exitInterrupted = 130
+
+// stdinIdleGrace is how long print mode waits for the first byte of piped
+// input when a prompt was already given, so a stdin that is attached but never
+// written to (a CI runner, a parent holding the pipe open) cannot hang a run.
+var stdinIdleGrace = 3 * time.Second
+
+// readPipedStdin returns the text piped into the process, trimmed. ok is false
+// when stdin is a terminal or unreadable. With hasPrompt the read gives up if
+// no byte arrives within stdinIdleGrace; without one the prompt can only come
+// from stdin, so it waits for EOF.
+func readPipedStdin(hasPrompt bool) (string, bool) {
+	info, err := os.Stdin.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice != 0 {
+		return "", false
+	}
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	started := make(chan struct{})
+	go func() {
+		r := bufio.NewReader(io.LimitReader(os.Stdin, 4*1024*1024))
+		if _, err := r.Peek(1); err != nil && err != io.EOF {
+			close(started)
+			done <- result{err: err}
+			return
+		}
+		close(started)
+		data, err := io.ReadAll(r)
+		done <- result{data: data, err: err}
+	}()
+	if hasPrompt {
+		select {
+		case <-started:
+		case <-time.After(stdinIdleGrace):
+			return "", false
+		}
+	}
+	res := <-done
+	if res.err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(res.data)), true
 }
 
 // printPrompter denies gated tools in non-interactive mode.

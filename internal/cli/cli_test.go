@@ -48,6 +48,12 @@ type mockServer struct {
 	catalog   []api.CatalogModel
 	chatFn    func(turn int, body api.ChatRequest) []string
 	mcpText   string
+	// chatFail, when set, may answer a chat request with a plain HTTP error
+	// (non-zero status plus JSON body) instead of a stream.
+	chatFail func(turn int) (status int, body string)
+	// omitDone ends each stream without the terminating [DONE] frame, like a
+	// connection that was cut mid-turn.
+	omitDone bool
 
 	mu       sync.Mutex
 	turns    int
@@ -117,6 +123,14 @@ func newMockServer(t *testing.T, agents []api.Agent, chatFn func(turn int, body 
 			m.chats = append(m.chats, body)
 			m.mu.Unlock()
 
+			if m.chatFail != nil {
+				if status, errBody := m.chatFail(turn); status != 0 {
+					w.Header().Set("content-type", "application/json")
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, errBody)
+					return
+				}
+			}
 			w.Header().Set("content-type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			flusher := w.(http.Flusher)
@@ -124,8 +138,10 @@ func newMockServer(t *testing.T, agents []api.Agent, chatFn func(turn int, body 
 				_, _ = io.WriteString(w, "data: "+payload+"\n\n")
 				flusher.Flush()
 			}
-			_, _ = io.WriteString(w, "data: [DONE]\n\n")
-			flusher.Flush()
+			if !m.omitDone {
+				_, _ = io.WriteString(w, "data: [DONE]\n\n")
+				flusher.Flush()
+			}
 		case "/v1/mcp":
 			m.handleMCP(w, r)
 		default:

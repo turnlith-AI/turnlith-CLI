@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -112,6 +113,53 @@ func (l *limitedBuffer) String() string {
 		s += "\n… (output truncated)"
 	}
 	return s
+}
+
+// isPureCRLF reports whether every line ending in s is "\r\n" (and there is at
+// least one). Mixed files are deliberately not "CRLF files": rewriting their
+// endings wholesale would change lines the edit never touched.
+func isPureCRLF(s string) bool {
+	n := strings.Count(s, "\n")
+	return n > 0 && strings.Count(s, "\r\n") == n
+}
+
+func toLF(s string) string   { return strings.ReplaceAll(s, "\r\n", "\n") }
+func toCRLF(s string) string { return strings.ReplaceAll(toLF(s), "\n", "\r\n") }
+
+// writeFileAtomic replaces path with data without ever exposing a half-written
+// file: it writes a temp file beside the target and renames it into place.
+// Symlinks are followed (the link survives, the target changes), and mode is
+// applied to the new file. Where a temp file cannot be created (read-only
+// directory with a writable file) it falls back to an in-place write.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	target := path
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		target = real
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".tlc-*.tmp")
+	if err != nil {
+		return os.WriteFile(target, data, mode)
+	}
+	name := tmp.Name()
+	fail := func(err error) error {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Chmod(mode); err != nil && runtime.GOOS != "windows" {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fail(err)
+	}
+	if err := os.Rename(name, target); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // lineCount counts lines in s, treating a trailing newline as a terminator.

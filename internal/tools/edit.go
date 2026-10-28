@@ -62,6 +62,9 @@ func (t *EditTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	if !t.Tracker.WasRead(path) {
 		return "", fmt.Errorf("%s has not been read in this session — read it first so the edit matches reality", path)
 	}
+	if t.Tracker.Stale(path) {
+		return "", fmt.Errorf("%s has changed on disk since it was read — read it again so the edit matches reality", path)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("cannot read %s: %w", path, err)
@@ -71,7 +74,15 @@ func (t *EditTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	}
 	content := string(data)
 
-	count := strings.Count(content, args.OldString)
+	// Read shows CRLF files with plain newlines, so the model's old_string
+	// carries "\n". Match on LF text and restore CRLF afterwards.
+	oldString, newString := args.OldString, args.NewString
+	crlf := isPureCRLF(content)
+	if crlf {
+		content, oldString, newString = toLF(content), toLF(oldString), toLF(newString)
+	}
+
+	count := strings.Count(content, oldString)
 	if count == 0 {
 		return "", fmt.Errorf("old_string was not found in %s — the file may have changed; read it again", path)
 	}
@@ -82,14 +93,17 @@ func (t *EditTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	if args.ReplaceAll {
 		replaced = count
 	}
-	updated := strings.Replace(content, args.OldString, args.NewString, replaced)
+	updated := strings.Replace(content, oldString, newString, replaced)
+	if crlf {
+		updated = toCRLF(updated)
+	}
 
 	info, err := os.Stat(path)
 	mode := os.FileMode(0o644)
 	if err == nil {
 		mode = info.Mode().Perm()
 	}
-	if err := os.WriteFile(path, []byte(updated), mode); err != nil {
+	if err := writeFileAtomic(path, []byte(updated), mode); err != nil {
 		return "", fmt.Errorf("cannot write %s: %w", path, err)
 	}
 	t.Tracker.MarkEdited(path)
