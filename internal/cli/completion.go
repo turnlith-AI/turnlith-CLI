@@ -5,6 +5,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/turnlith-AI/turnlith-CLI/internal/harness"
 )
 
 // flagHelp describes every long flag for the shells that show descriptions
@@ -16,16 +18,18 @@ var flagHelp = map[string]string{
 	"--continue":         "continue the previous conversation in this directory",
 	"--yolo":             "run every gated tool without asking",
 	"--verbose":          "show token usage after each turn",
-	"--project":          "install: target ./opencode.json instead of the user config",
-	"--no-mcp":           "install: skip the turnlith-controller MCP block",
-	"--use-env":          "install: write {env:TLITH_API_KEY} instead of the key",
+	"--project":          "install: write the project-level config instead of the user config",
+	"--no-mcp":           "install: skip the turnlith-controller MCP server",
+	"--use-env":          "install: reference $TLITH_API_KEY instead of embedding the key",
+	"--list":             "install: show the clients and what is installed, change nothing",
+	"--if-detected":      "install: exit quietly when no client is detected",
 	"--api-key-stdin":    "configure: read the api key from stdin",
 	"--agent":            "agent codename to talk to",
 	"--name":             "agents create: codename",
 	"--label":            "agents create: human-readable label",
 	"--model":            "agents create: model spec, e.g. gemini:gemini-3.8-flash",
 	"--effort":           "agents create: reasoning effort",
-	"--provider-id":      "install: provider key in the opencode config",
+	"--provider-id":      "install: provider key in the client config",
 	"--base-url":         "server URL for this run",
 	"--api-key":          "api key for this run (visible in ps; prefer the environment)",
 	"--allowed-tools":    "permission rules to allow, comma separated",
@@ -50,8 +54,8 @@ var topCommands = []commandInfo{
 	{"agents", "list or create the workspace's agents"},
 	{"configure", "save the server URL and api key"},
 	{"doctor", "check the connection, key, agent and local tools"},
-	{"install", "wire the agents into opencode"},
-	{"uninstall", "remove the turnlith blocks from the opencode config"},
+	{"install", "wire the agents into coding clients (opencode, pi, continue, cursor, cline)"},
+	{"uninstall", "remove the turnlith entries from those clients"},
 	{"completion", "print a shell completion script"},
 	{"help", "show help"},
 	{"version", "print the version"},
@@ -74,6 +78,9 @@ func allLongFlags() []string {
 	sort.Strings(out)
 	return out
 }
+
+// clientChoices are the names offered after install/uninstall.
+func clientChoices() []string { return append(harness.Names(), "all") }
 
 func commandNames() []string {
 	names := make([]string, len(topCommands))
@@ -121,7 +128,7 @@ func bashCompletion() string {
 	fmt.Fprintf(&b, "\tif [[ $COMP_CWORD -eq 1 ]]; then\n\t\tCOMPREPLY=( $(compgen -W %q -- \"$cur\") )\n\t\treturn 0\n\tfi\n", strings.Join(commandNames(), " "))
 	b.WriteString("\tcase \"${COMP_WORDS[1]}\" in\n")
 	b.WriteString("\t\tagents) COMPREPLY=( $(compgen -W \"list create\" -- \"$cur\") ) ;;\n")
-	b.WriteString("\t\tinstall|uninstall) COMPREPLY=( $(compgen -W \"opencode\" -- \"$cur\") ) ;;\n")
+	fmt.Fprintf(&b, "\t\tinstall|uninstall) COMPREPLY=( $(compgen -W %q -- \"$cur\") ) ;;\n", strings.Join(clientChoices(), " "))
 	b.WriteString("\t\tcompletion) COMPREPLY=( $(compgen -W \"bash zsh fish\" -- \"$cur\") ) ;;\n")
 	b.WriteString("\tesac\n}\ncomplete -F _tlc tlc\n")
 	return b.String()
@@ -166,7 +173,7 @@ func zshCompletion() string {
 	}
 	b.WriteString(" ;;\n\t\targs)\n\t\t\tcase $words[1] in\n")
 	b.WriteString("\t\t\t\tagents) _values 'subcommand' list create ;;\n")
-	b.WriteString("\t\t\t\tinstall|uninstall) _values 'harness' opencode ;;\n")
+	fmt.Fprintf(&b, "\t\t\t\tinstall|uninstall) _values 'client' %s ;;\n", strings.Join(clientChoices(), " "))
 	b.WriteString("\t\t\t\tcompletion) _values 'shell' bash zsh fish ;;\n")
 	b.WriteString("\t\t\tesac ;;\n\tesac\n}\n\n_tlc \"$@\"\n")
 	return b.String()
@@ -183,7 +190,7 @@ func fishCompletion() string {
 		fmt.Fprintf(&b, "complete -c tlc -n __fish_use_subcommand -a %s -d '%s'\n", c.name, fishQuote(c.help))
 	}
 	b.WriteString("complete -c tlc -n '__fish_seen_subcommand_from agents' -a 'list create'\n")
-	b.WriteString("complete -c tlc -n '__fish_seen_subcommand_from install uninstall' -a opencode\n")
+	fmt.Fprintf(&b, "complete -c tlc -n '__fish_seen_subcommand_from install uninstall' -a '%s'\n", strings.Join(clientChoices(), " "))
 	b.WriteString("complete -c tlc -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'\n")
 	for _, f := range allLongFlags() {
 		line := "complete -c tlc"

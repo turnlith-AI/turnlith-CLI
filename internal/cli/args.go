@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/turnlith-AI/turnlith-CLI/internal/harness"
 	"github.com/turnlith-AI/turnlith-CLI/internal/version"
 )
 
@@ -24,8 +25,9 @@ Commands:
   tlc configure              save the server URL and api key
   tlc doctor                 check the connection, key, agent and local tools
   tlc completion <shell>     print a completion script (bash, zsh, fish)
-  tlc install [opencode]     wire the server's agents into opencode (provider + MCP)
-  tlc uninstall [opencode]   remove the turnlith blocks from the opencode config
+  tlc install [client...]    wire the server's agents into coding clients (opencode, pi,
+                             continue, cursor, cline); no name = every client it detects
+  tlc uninstall [client...]  remove the turnlith entries from those clients
   tlc help | version         (also -h/--help and -v/--version)
 
 Options:
@@ -49,11 +51,13 @@ Options for ` + "`tlc agents create`" + `:
       --model     model spec, e.g. gemini:gemini-3.8-flash
       --effort    reasoning effort: none|minimal|low|medium|high|xhigh
 
-Options for ` + "`tlc install opencode`" + `:
-      --project       target ./opencode.json in the current directory
+Options for ` + "`tlc install`" + `:
+      --list          show each client, what tlc can write there and what is installed
+      --if-detected   no client named: do nothing (exit 0) when none is detected
+      --project       write the project-level config (./opencode.json, ./.cursor/mcp.json, ./.continue)
       --provider-id   provider key in the config (default: tlith)
-      --no-mcp        skip the turnlith-controller MCP server block
-      --use-env       write {env:TLITH_API_KEY} instead of embedding the key
+      --no-mcp        skip the turnlith-controller MCP server
+      --use-env       reference $TLITH_API_KEY instead of embedding the key
 
 Exit status of -p: 0 ok, 1 the run failed, 2 usage error, 130 interrupted. Piped stdin
 is appended to the prompt.
@@ -99,11 +103,13 @@ type options struct {
 	effort string
 
 	// `tlc install` / `tlc uninstall`
-	harness    string
+	clients    []string // canonical client ids; empty = detect (install) / find (uninstall)
 	project    bool
 	providerID string
 	noMcp      bool
 	useEnv     bool
+	list       bool // install --list: show the clients and their state, change nothing
+	ifDetected bool // install: no client named and none detected is not an error
 }
 
 // boolFlags are the switches; valueFlags take an argument (`--flag v` or
@@ -119,6 +125,8 @@ var boolFlags = map[string]func(*options){
 	"--project":       func(o *options) { o.project = true },
 	"--no-mcp":        func(o *options) { o.noMcp = true },
 	"--use-env":       func(o *options) { o.useEnv = true },
+	"--list":          func(o *options) { o.list = true },
+	"--if-detected":   func(o *options) { o.ifDetected = true },
 	"--api-key-stdin": func(o *options) { o.apiKeyStdin = true },
 }
 
@@ -156,6 +164,27 @@ var valueFlags = map[string]func(*options, string) error{
 		}
 		return fmt.Errorf("--output-format must be text, json, or stream-json, got %q", v)
 	},
+}
+
+// resolveClientNames maps one `install`/`uninstall` argument to canonical
+// client ids: a client name or alias, or "all".
+func resolveClientNames(arg string) ([]string, error) {
+	if strings.EqualFold(arg, "all") {
+		return harness.Names(), nil
+	}
+	if c, ok := harness.Lookup(arg); ok {
+		return []string{c.ID}, nil
+	}
+	return nil, fmt.Errorf("unknown client %q — supported: %s, or \"all\"", arg, strings.Join(harness.Names(), ", "))
+}
+
+func contains(list []string, s string) bool {
+	for _, item := range list {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }
 
 // splitRules splits a comma-separated rule list, ignoring commas inside
@@ -252,13 +281,18 @@ func parseArgs(argv []string) (options, error) {
 					return opts, fmt.Errorf("unknown `agents` subcommand %q — use `tlc agents` or `tlc agents create`", arg)
 				}
 			}
-			// optional harness name right after install/uninstall
-			if (opts.command == "install" || opts.command == "uninstall") && opts.harness == "" && len(promptWords) == 0 {
-				if arg == "opencode" {
-					opts.harness = arg
-					continue
+			// client names after install/uninstall
+			if (opts.command == "install" || opts.command == "uninstall") && len(promptWords) == 0 {
+				ids, err := resolveClientNames(arg)
+				if err != nil {
+					return opts, err
 				}
-				return opts, fmt.Errorf("unknown harness %q — supported: opencode", arg)
+				for _, id := range ids {
+					if !contains(opts.clients, id) {
+						opts.clients = append(opts.clients, id)
+					}
+				}
+				continue
 			}
 			seenPositional = true
 			promptWords = append(promptWords, arg)
@@ -275,7 +309,7 @@ func parseArgs(argv []string) (options, error) {
 		return opts, fmt.Errorf("`tlc agents create` takes flags, not a prompt — unexpected %q", opts.prompt)
 	}
 	if (opts.command == "install" || opts.command == "uninstall") && opts.prompt != "" {
-		return opts, fmt.Errorf("`tlc %s` takes flags and an optional harness name, not a prompt — unexpected %q", opts.command, opts.prompt)
+		return opts, fmt.Errorf("`tlc %s` takes flags and client names, not a prompt — unexpected %q", opts.command, opts.prompt)
 	}
 	return opts, nil
 }

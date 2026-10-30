@@ -14,6 +14,7 @@ versions follow [semantic versioning](https://semver.org/) (pre-1.0: minor versi
 - `/status` masks short api keys too.
 
 ### Added
+- **More coding clients**: `tlc install` now wires the turnlith agents into **Pi**, **Continue**, **Cursor** and **Cline**, not just opencode. Pi and Continue get the agents as models; Cursor and Cline get the `turnlith-controller` MCP server and print the model settings they keep in the app. `tlc install cursor pi` takes several names (or `all`), `tlc install --list` shows what is detected and installed, `--if-detected` makes the call a quiet no-op when nothing is found, and the one-paste `install.sh` now wires every detected client.
 - **Permission rules**: `Bash(go test:*)`, `Edit(docs/**)`, … via `--allowed-tools` / `--disallowed-tools`, `p` ("always in this project", stored in the user's config) and the repo's deny list. An "always" answer now remembers the command prefix, not all of Bash. Chained commands must match segment by segment; substitution and redirection are never covered by an allow rule. Deny rules win over everything, `--yolo` included. Read-only builtins (`git status|diff|log|show`, `ls`, `pwd`, …) no longer prompt.
 - **Project instructions**: `TLC.md` / `AGENTS.md` / `CLAUDE.md` (plus `~/.config/tlith/TLC.md`) are loaded into the system prompt, capped and announced; `/init` has the agent write `TLC.md`.
 - **Plan mode** (`--permission-mode plan`): read-only; refusals explain themselves to the model.
@@ -26,6 +27,7 @@ versions follow [semantic versioning](https://semver.org/) (pre-1.0: minor versi
 - CI: race detector, Windows/macOS/arm64 vet+build, `go mod tidy` check, Dependabot.
 
 ### Changed
+- `tlc install` with no client name now wires **every detected client** (it used to look only for opencode), and `tlc uninstall` with no name removes the turnlith entries from every client that has them (it used to assume opencode). A flag a client cannot honour (e.g. `--project` for Pi) skips that client with a note, or is a usage error when it is the only one named.
 - `-p` exits `1` when the run fails (it always exited `0`).
 - Tool results are summarized in the transcript ("Read 120 lines"); long `Bash` output keeps its head *and* tail.
 - `-c` prefers the latest session with the current agent.

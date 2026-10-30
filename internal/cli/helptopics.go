@@ -36,20 +36,38 @@ instructions).
 Exit status is 1 when something failed, 0 otherwise (warnings do not fail).
 Inside a session, /doctor runs the same checks.
 `,
-	"install": `tlc install / uninstall — wire the agents into another harness
+	"install": `tlc install / uninstall — wire the agents into your coding clients
 
-  tlc install opencode        add a "tlith" provider and the turnlith-controller MCP server
-  tlc uninstall opencode      remove exactly those blocks
+  tlc install                 every client it detects (opencode, pi, continue, cursor, cline)
+  tlc install cursor pi       just these ("all" = every client)
+  tlc install --list          show each client, what tlc can write there, and what is installed
+  tlc uninstall [client...]   remove exactly what install added (no name = every client that has it)
+
+What each client gets:
+  opencode   a "tlith" provider (the agents as models) + the turnlith-controller MCP server
+  pi         a "tlith" provider in ~/.pi/agent/models.json (Pi has no MCP)
+  continue   models + MCP server as tlc-owned files under ~/.continue
+  cursor     the MCP server in ~/.cursor/mcp.json — model settings are manual (printed)
+  cline      the MCP server in Cline's settings — model settings are manual (printed)
 
 Options:
-      --project       target ./opencode.json in the current directory
-      --provider-id   provider key in the config (default: tlith)
-      --no-mcp        skip the turnlith-controller MCP server block
-      --use-env       write {env:TLITH_API_KEY} instead of embedding the key
+      --list          show the clients and their state; change nothing
+      --if-detected   no client named: exit 0 quietly when none is detected (for scripts)
+      --project       write the project-level config (opencode, cursor, continue)
+      --provider-id   provider key in the config (default: tlith; opencode, pi, continue)
+      --no-mcp        skip the turnlith-controller MCP server
+      --use-env       reference $TLITH_API_KEY instead of embedding the key (not cline)
 
-Comments and other providers in the config are left untouched.
+A flag a client cannot honour skips that client with a note (an error when it is the
+only one named). Comments and other entries in JSON configs are left untouched.
 `,
-	"uninstall": `tlc uninstall opencode — remove the turnlith blocks from the opencode config
+	"uninstall": `tlc uninstall [client...] — remove the turnlith entries added by tlc install
+
+  tlc uninstall               every client that has them
+  tlc uninstall opencode      just opencode
+
+Only what tlc wrote is removed; the files tlc owns for Continue are deleted, anything
+you wrote yourself is left alone. --project and --provider-id work as for install.
 
 See: tlc help install
 `,

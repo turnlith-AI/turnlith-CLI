@@ -125,7 +125,7 @@ func TestPerCommandHelp(t *testing.T) {
 					t.Errorf("%v: help lacks %q:\n%s", argv, w, res.stdout)
 				}
 			}
-			if strings.Contains(res.stdout, "Options for `tlc install opencode`") && topic != "install" {
+			if strings.Contains(res.stdout, "Options for `tlc install`") && topic != "install" {
 				t.Errorf("%v printed the global help instead of the %s topic", argv, topic)
 			}
 		}

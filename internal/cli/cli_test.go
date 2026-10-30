@@ -55,11 +55,13 @@ type mockServer struct {
 	// connection that was cut mid-turn.
 	omitDone bool
 
-	mu       sync.Mutex
-	turns    int
-	chats    []api.ChatRequest
-	methods  []string
-	mcpCalls []mcpCall
+	mu    sync.Mutex
+	turns int
+	// modelsHits counts GET /v1/models — `tlc install` lists the agents there.
+	modelsHits int
+	chats      []api.ChatRequest
+	methods    []string
+	mcpCalls   []mcpCall
 
 	nextID  int
 	creates []api.CreateAgentInput
@@ -97,6 +99,7 @@ func newMockServer(t *testing.T, agents []api.Agent, chatFn func(turn int, body 
 			writeJSON(w, map[string]any{"status": "ok"})
 		case "/v1/models":
 			m.mu.Lock()
+			m.modelsHits++
 			agents := append([]api.Agent(nil), m.agents...)
 			m.mu.Unlock()
 			data := make([]map[string]string, 0, len(agents))
