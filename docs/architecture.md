@@ -75,7 +75,7 @@ mode, so even `yolo` cannot read `~/.ssh`.
 | `internal/ui` | theme, streaming markdown `Styler`, `Renderer` (transcript, diffs, prompts), readline REPL, one-key prompts, `/files` browser, command table |
 | `internal/config` | connection file, per-project saved rules, `.tlc/settings.json` (deny only), URL validation |
 | `internal/history` | local JSONL transcripts for `-c` and `/resume` (display only; real memory is server-side) |
-| `internal/harness` | opencode config merge (JSONC-aware) |
+| `internal/harness` | the coding-client registry (opencode, Pi, Continue, Cursor, Cline): per-client config paths and blocks, JSONC-aware merge, uninstall, detection |
 
 ## Where state lives
 

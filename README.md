@@ -21,7 +21,7 @@ Looking at the test, the flake comes from a shared clock …
 - **You stay in control.** Edits and commands need your approval, with a clear diff first. Plan mode keeps the agent read-only while it explores.
 - **Your choice of model.** Use any agent in your turnlith workspace and switch models mid-session.
 - **Built for automation.** One-shot mode with JSON output fits scripts, pipes, and CI.
-- **Works with opencode.** Use your turnlith agents there too with `tlc install opencode`.
+- **Works with your other coding clients.** `tlc install` wires your turnlith agents into opencode, Pi, Continue, Cursor and Cline.
 
 ## Install
 
@@ -65,7 +65,7 @@ file tools. See [SECURITY.md](SECURITY.md) for details.
 
 ## Documentation
 
-- [Reference](docs/reference.md) — permissions, configuration, flags, commands, opencode
+- [Reference](docs/reference.md) — permissions, configuration, flags, commands, other coding clients
 - [Architecture](docs/architecture.md) — how it works under the hood
 - [Contributing](CONTRIBUTING.md) — build, test, and extend `tlc`
 - [Security](SECURITY.md) — protections and how to report a vulnerability

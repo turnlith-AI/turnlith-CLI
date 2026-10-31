@@ -8,7 +8,7 @@ Detailed behavior for `tlc`. For an overview and quick start, see the [README](.
 - [Usage and flags](#usage-and-flags)
 - [Files and REPL commands](#files-and-repl-commands)
 - [Working with the agent's changes](#working-with-the-agents-changes)
-- [Using tlc inside opencode](#using-tlc-inside-opencode)
+- [Using tlc inside other coding clients](#using-tlc-inside-other-coding-clients)
 - [Resilience and troubleshooting](#resilience-and-troubleshooting)
 
 ## Tools and permissions
@@ -155,7 +155,7 @@ tlc -c                       # continue the previous conversation here
 tlc --agent sigma            # pick the agent (model) explicitly
 tlc agents                   # list the workspace's agents
 tlc agents create            # create an agent (ask-first wizard on a terminal)
-tlc install opencode         # wire the agents into opencode
+tlc install                  # wire the agents into every coding client it detects
 ```
 
 `--agent` matters: memory, transcripts, and billing are per agent. The
@@ -229,31 +229,57 @@ continues the latest one, preferring the current agent. Local transcripts
 (display-only — the real memory is on the server) are JSONL files under
 `~/.local/share/tlith/tlc/sessions/`, one per session.
 
-## Using tlc inside opencode
+## Using tlc inside other coding clients
 
-`tlc` can also wire your turnlith agents into other harnesses. For
-[opencode](https://opencode.ai):
+`tlc install` wires your turnlith agents into the coding clients you already
+use:
 
 ```sh
-tlc install opencode
+tlc install                 # every client it detects
+tlc install cursor pi       # just these (or "all")
+tlc install --list          # what is detected, what tlc can write, what is installed
+tlc uninstall               # remove exactly what install added, from every client that has it
 ```
 
-This writes a `turnlith` provider into `~/.config/opencode/opencode.json`
-(or the project's `./opencode.json` with `--project`, preferring an existing
-`opencode.jsonc`) exposing every agent as a model under its codename, plus
-the `turnlith-controller` MCP server for interactive memory search. The edit
-is JSONC-aware: comments and other providers stay untouched, and
-`tlc uninstall opencode` removes exactly the turnlith blocks.
+| Client | What tlc writes | Where |
+| ------ | --------------- | ----- |
+| [opencode](https://opencode.ai) | a `tlith` provider (every agent as a model) + the `turnlith-controller` MCP server | `~/.config/opencode/opencode.json` (or `./opencode.json` with `--project`; an existing `opencode.jsonc` is preferred) |
+| Pi | a `tlith` provider (every agent as a model); Pi has no MCP | `~/.pi/agent/models.json` (`$PI_CODING_AGENT_DIR` if set) |
+| Continue | the agents as models + the MCP server, as files tlc owns | `~/.continue/models/tlith.yaml` and `~/.continue/mcpServers/turnlith-controller.yaml` (`$CONTINUE_GLOBAL_DIR` if set; `./.continue/…` with `--project`) |
+| Cursor | the `turnlith-controller` MCP server; model settings are manual | `~/.cursor/mcp.json` (or `./.cursor/mcp.json` with `--project`) |
+| Cline | the `turnlith-controller` MCP server; model settings are manual | `cline_mcp_settings.json` of every VS Code flavour that has Cline (VS Code, Insiders, VSCodium, Cursor, Windsurf) |
+
+Cursor and Cline keep their model settings (a custom OpenAI base URL and model
+names) in app state, not in a file tlc can edit, so `tlc install` prints the
+steps: the base URL, where to paste your key, and the agent codenames to add.
+
+JSON configs are edited in place: comments, formatting and other entries stay
+untouched, and `tlc uninstall` removes exactly the turnlith entries. For
+Continue, tlc writes whole files of its own, marked on the first line; it
+refuses to overwrite a same-named file it did not write and only ever deletes
+marked ones.
 
 | Flag             | Meaning                                              |
 | ---------------- | ---------------------------------------------------- |
-| `--project`      | target `./opencode.json` in the current directory    |
-| `--provider-id`  | provider key in the config (default `tlith`)         |
-| `--no-mcp`       | skip the turnlith-controller MCP server block        |
-| `--use-env`      | write `{env:TLITH_API_KEY}` instead of embedding the key |
+| `--list`         | show each client, what tlc can write there and what is installed; changes nothing |
+| `--if-detected`  | no client named: exit 0 quietly when none is detected (used by `install.sh`) |
+| `--project`      | write the project-level config (opencode, Cursor, Continue) |
+| `--provider-id`  | provider key in the config, default `tlith` (opencode, Pi, Continue) |
+| `--no-mcp`       | skip the turnlith-controller MCP server              |
+| `--use-env`      | reference `TLITH_API_KEY` instead of embedding the key (not Cline) |
 
-With `--use-env`, export the key in your shell
-(`export TLITH_API_KEY=sk-…`) and it stays out of the config file.
+A flag a client cannot honour skips that client with a note, so a global config
+is never written when you asked for a project one, and the key is never
+embedded when you asked for the environment. When it is the only client you
+named, it is a usage error (exit 2). If one client's config cannot be written
+(say, an `mcp.json` with a syntax error), the others are still installed and the
+exit status is 1.
+
+With `--use-env`, export the key in your shell (`export TLITH_API_KEY=sk-…`) and
+it stays out of the config file. The reference differs per client: opencode
+`{env:TLITH_API_KEY}`, Pi `$TLITH_API_KEY`, Cursor `${env:TLITH_API_KEY}`,
+Continue `${{ secrets.TLITH_API_KEY }}` (Continue resolves secrets from its
+`.env` files).
 
 ## Resilience and troubleshooting
 

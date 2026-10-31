@@ -94,11 +94,13 @@ if [ -n "${TLITH_API_KEY:-}" ]; then
   if ! "$INSTALL_DIR/$BIN" configure --base-url "$base" --api-key "$TLITH_API_KEY"; then
     die "configure failed — run \`tlc configure --base-url $base --api-key <key>\` yourself"
   fi
-  if command -v opencode >/dev/null 2>&1; then
-    "$INSTALL_DIR/$BIN" install opencode ||
-      die "opencode wiring failed — run \`tlc install opencode\` yourself"
+  # Wire whichever coding clients are installed (opencode, pi, continue,
+  # cursor, cline). A failure here is not fatal: tlc is installed and
+  # configured by now, and `tlc install` can be rerun at any time.
+  if ! "$INSTALL_DIR/$BIN" install --if-detected; then
+    say "warning: could not wire every coding client — run \`tlc install\` yourself (\`tlc install --list\` shows what is detected)"
   fi
-  say "next: run \`tlc\`, or open opencode and pick an agent under \"turnlith\" in /models"
+  say "next: run \`tlc\`, or open a wired coding client and pick a turnlith agent"
 else
   say "next: tlc configure --base-url <server> --api-key sk-…"
 fi
