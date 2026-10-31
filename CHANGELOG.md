@@ -5,7 +5,11 @@ versions follow [semantic versioning](https://semver.org/) (pre-1.0: minor versi
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-31
+
 ### Security
+- Client configs `tlc install` writes (they hold the api key) and tlc's own connection file are now owner-only (`0600`) even when they already existed with wider permissions.
+- `install.sh` refuses to install when the release's checksums are missing or no sha256 tool is available, instead of warning and continuing.
 - File tools ask before touching anything outside the working directory (judged after symlink resolution), and `auto` mode no longer waves such edits through.
 - Credential stores (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, cloud/registry tokens and tlc's own `~/.config/tlith`, which holds the api key) are refused by the file tools in every mode, `yolo` included.
 - Plain `http://` to a non-loopback server is refused unless `TLC_ALLOW_INSECURE=1`; `localhost.evil.com` no longer counts as localhost. `--api-key-stdin` for `tlc configure`; `--api-key` warns that it is visible in the process list.
@@ -27,6 +31,7 @@ versions follow [semantic versioning](https://semver.org/) (pre-1.0: minor versi
 - CI: race detector, Windows/macOS/arm64 vet+build, `go mod tidy` check, Dependabot.
 
 ### Changed
+- `tlc configure` and `install.sh` default to the hosted service at `https://dash.turnlith.com` (was `http://localhost:8080` / `https://turnlith.com`).
 - `tlc install` with no client name now wires **every detected client** (it used to look only for opencode), and `tlc uninstall` with no name removes the turnlith entries from every client that has them (it used to assume opencode). A flag a client cannot honour (e.g. `--project` for Pi) skips that client with a note, or is a usage error when it is the only one named.
 - `-p` exits `1` when the run fails (it always exited `0`).
 - Tool results are summarized in the transcript ("Read 120 lines"); long `Bash` output keeps its head *and* tail.
@@ -54,6 +59,7 @@ versions follow [semantic versioning](https://semver.org/) (pre-1.0: minor versi
 - First release: a terminal coding agent backed by a turnlith server — streaming answers, local `Read`/`Write`/`Edit`/`Bash`/`Glob`/`Grep` tools behind permission prompts, server-side `SearchMemory`, local transcripts.
 - Prebuilt binaries for Linux, macOS and Windows with an installer script; the config path matches the `tlith` CLI's.
 
-[Unreleased]: https://github.com/turnlith-AI/turnlith-CLI/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/turnlith-AI/turnlith-CLI/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/turnlith-AI/turnlith-CLI/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/turnlith-AI/turnlith-CLI/releases/tag/v0.2.0
 [0.1.0]: https://github.com/turnlith-AI/turnlith-CLI/releases/tag/v0.1.0

@@ -7,7 +7,7 @@ changes, and runs your tests — asking before it touches anything.
 
 ```
 $ tlc
-tlc v0.2.0 · sigma (gemini:gemini-3.8-flash) · ~/code/my-app
+tlc v0.3.0 · sigma (gemini:gemini-3.8-flash) · ~/code/my-app
 ❯ why is the login test flaky?
 
 ⏺ Read(internal/auth/login_test.go)
@@ -36,7 +36,7 @@ Supports Linux and macOS (amd64/arm64). Windows builds are on the
 ## Get started
 
 ```sh
-tlc configure --base-url https://turnlith.com   # enter your API key when prompted
+tlc configure --base-url https://dash.turnlith.com   # enter your API key when prompted
 cd your-project
 tlc
 ```

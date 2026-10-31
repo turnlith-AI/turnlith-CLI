@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -463,9 +464,11 @@ func TestInstallMergesExistingConfig(t *testing.T) {
 	if provider["tlith"].(map[string]any)["npm"] != "@ai-sdk/openai-compatible" {
 		t.Error("our provider block missing")
 	}
-	// an existing file keeps the user's permissions
-	if info, err := os.Stat("opencode.json"); err == nil && info.Mode().Perm() != 0o644 {
-		t.Errorf("existing config mode changed to %o", info.Mode().Perm())
+	// the merged file now holds the api key: others lose read access
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat("opencode.json"); err == nil && info.Mode().Perm() != 0o600 {
+			t.Errorf("existing config mode = %o, want 600", info.Mode().Perm())
+		}
 	}
 }
 

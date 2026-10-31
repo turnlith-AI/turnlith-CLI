@@ -18,7 +18,7 @@ Creating agents and changing a model needs an admin-role key; chatting needs an 
 `,
 	"configure": `tlc configure — save the server URL and api key
 
-  tlc configure --base-url https://turnlith.com      asks for the key without echoing it
+  tlc configure --base-url https://dash.turnlith.com asks for the key without echoing it
   echo "$KEY" | tlc configure --base-url … --api-key-stdin
 
 The key and URL are verified (health check, then an authenticated call) before

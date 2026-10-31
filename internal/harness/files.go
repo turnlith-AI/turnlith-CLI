@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -22,15 +23,35 @@ func preferJSONC(path string) string {
 	return path
 }
 
-// writeConfig writes a config file, creating its directory. The mode applies
-// only on create; an existing file keeps the user's permissions. The write is
+// writeConfig writes a config file, creating its directory. The write is
 // deliberately not a temp-file rename: that would replace a symlinked dotfile
-// with a regular file.
+// with a regular file. Every client config tlc writes carries the api key,
+// so an existing file that others could read loses its group/other bits
+// (the owner's own bits are kept).
 func writeConfig(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return restrictToOwner(path)
+}
+
+// restrictToOwner clears group/other permission bits. Windows has no such
+// bits (os.Chmod only toggles read-only there), so it is a no-op.
+func restrictToOwner(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return os.Chmod(path, perm&^0o077)
+	}
+	return nil
 }
 
 func readOrNull(path string) ([]byte, error) {

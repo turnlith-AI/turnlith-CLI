@@ -116,7 +116,7 @@ permission system.
 ## Configuration
 
 ```sh
-tlc configure --base-url https://turnlith.com
+tlc configure --base-url https://dash.turnlith.com
 ```
 
 `tlc configure` asks for the key without echoing it, verifies the server's
@@ -138,7 +138,7 @@ one-paste setup (the key never touches a URL):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/turnlith-AI/turnlith-CLI/main/install.sh \
-  | TLITH_API_KEY=sk-… TLITH_BASE_URL=https://turnlith.com sh
+  | TLITH_API_KEY=sk-… TLITH_BASE_URL=https://dash.turnlith.com sh
 ```
 
 The installer verifies the release checksum and installs to `~/.local/bin/tlc`

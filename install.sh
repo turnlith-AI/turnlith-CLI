@@ -9,7 +9,7 @@
 #   TLITH_API_KEY    when set, configure the connection after installing
 #                    (passed via the environment, never the download URL)
 #   TLITH_BASE_URL   server URL for that configuration (default:
-#                    https://turnlith.com)
+#                    https://dash.turnlith.com)
 set -eu
 
 REPO="turnlith-AI/turnlith-CLI"
@@ -52,18 +52,18 @@ trap 'rm -rf "$tmp"' EXIT
 say "downloading $asset ($version)"
 curl -fsSL "$base/$asset" -o "$tmp/$asset" || die "download failed: $base/$asset"
 
-if curl -fsSL "$base/sha256sums.txt" -o "$tmp/sums.txt" 2>/dev/null &&
-  grep -q " $asset\$" "$tmp/sums.txt"; then
-  grep " $asset\$" "$tmp/sums.txt" > "$tmp/check.txt"
-  if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$tmp" && sha256sum -c --quiet check.txt) || die "checksum verification failed"
-  elif command -v shasum >/dev/null 2>&1; then
-    (cd "$tmp" && shasum -a 256 -c check.txt >/dev/null) || die "checksum verification failed"
-  else
-    say "warning: no sha256 tool found, skipping checksum verification"
-  fi
+# every release since v0.1.1 publishes sha256sums.txt: a missing or
+# non-matching checksum means a broken or tampered download, never "skip"
+curl -fsSL "$base/sha256sums.txt" -o "$tmp/sums.txt" 2>/dev/null ||
+  die "could not download the checksums for $version ($base/sha256sums.txt)"
+grep " $asset\$" "$tmp/sums.txt" > "$tmp/check.txt" ||
+  die "no checksum for $asset in the $version release"
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$tmp" && sha256sum -c --quiet check.txt) || die "checksum verification failed"
+elif command -v shasum >/dev/null 2>&1; then
+  (cd "$tmp" && shasum -a 256 -c check.txt >/dev/null) || die "checksum verification failed"
 else
-  say "warning: no checksums published for this release, skipping verification"
+  die "sha256sum or shasum is required to verify the download"
 fi
 
 tar -xzf "$tmp/$asset" -C "$tmp"
@@ -88,7 +88,7 @@ esac
 # One-paste setup: the caller holds the api key in the environment only —
 # it never appears in a URL or this script's output.
 if [ -n "${TLITH_API_KEY:-}" ]; then
-  base="${TLITH_BASE_URL:-https://turnlith.com}"
+  base="${TLITH_BASE_URL:-https://dash.turnlith.com}"
   say ""
   say "configuring tlc for $base"
   if ! "$INSTALL_DIR/$BIN" configure --base-url "$base" --api-key "$TLITH_API_KEY"; then
@@ -102,7 +102,7 @@ if [ -n "${TLITH_API_KEY:-}" ]; then
   fi
   say "next: run \`tlc\`, or open a wired coding client and pick a turnlith agent"
 else
-  say "next: tlc configure --base-url <server> --api-key sk-…"
+  say "next: tlc configure --base-url https://dash.turnlith.com   (asks for your api key)"
 fi
 
 if command -v tlith >/dev/null 2>&1; then

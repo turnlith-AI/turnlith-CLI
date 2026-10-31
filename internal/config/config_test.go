@@ -178,3 +178,31 @@ func TestValidateBaseURLErrorNeverEchoesCredentials(t *testing.T) {
 		t.Fatalf("error leaks secrets: %v", err)
 	}
 }
+
+func TestSaveConnectionTightensAnExistingWorldReadableFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no unix permission bits")
+	}
+	isolate(t)
+	path := ConnectionPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// a pre-existing file another tool left readable to everyone
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveConnection(Connection{BaseURL: "https://dash.turnlith.com", APIKey: "sk-test-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %o, want 600", got)
+	}
+}

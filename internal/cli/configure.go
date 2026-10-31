@@ -44,7 +44,9 @@ func runConfigure(opts options) int {
 		if existing, err := config.LoadConnection(); err == nil && existing.BaseURL != "" {
 			baseURL = existing.BaseURL
 		} else {
-			baseURL = "http://localhost:8080"
+			// the hosted service; a self-hosted or local dev server
+			// (http://localhost:8080) is one answer away at the prompt
+			baseURL = config.DefaultBaseURL
 		}
 		renderer.Infof("turnlith server URL [%s]:", baseURL)
 		answer, err := repl.Readline()

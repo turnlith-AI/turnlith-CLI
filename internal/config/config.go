@@ -13,10 +13,14 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
 const (
+	// DefaultBaseURL is the hosted turnlith service (API + console).
+	DefaultBaseURL = "https://dash.turnlith.com"
+
 	EnvBaseURL = "TLITH_BASE_URL"
 	EnvAPIKey  = "TLITH_API_KEY"
 	EnvAgent   = "TLC_AGENT"
@@ -127,10 +131,10 @@ func isLoopbackHost(host string) bool {
 func ValidateBaseURL(raw string) error {
 	u, err := neturl.Parse(raw)
 	if err != nil {
-		return errors.New("invalid server URL: expected something like https://turnlith.com")
+		return errors.New("invalid server URL: expected something like https://dash.turnlith.com")
 	}
 	if u.Host == "" {
-		return errors.New("invalid server URL: missing host (expected something like https://turnlith.com)")
+		return errors.New("invalid server URL: missing host (expected something like https://dash.turnlith.com)")
 	}
 	switch u.Scheme {
 	case "https":
@@ -204,10 +208,30 @@ func SaveConnection(conn Connection) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	if err := writePrivate(path, append(data, '\n')); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// writePrivate writes a file that holds the api key. os.WriteFile applies
+// its mode only when creating, so an existing file that others could read
+// also loses its group/other bits (no-op on Windows, which has none).
+func writePrivate(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return os.Chmod(path, perm&^0o077)
+	}
+	return nil
 }
 
 // LoadPrefs never fails; unreadable prefs are treated as empty.
