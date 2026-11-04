@@ -103,12 +103,12 @@ func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 			}
 			return nil, 0, false
 		},
-			FuncFilterInputRune: func(r rune) (rune, bool) {
-				if stdinIsTerminal && r == '\n' {
-					return newlinePlaceholder, true
-				}
-				return r, true
-			},
+		FuncFilterInputRune: func(r rune) (rune, bool) {
+			if stdinIsTerminal && r == '\n' {
+				return newlinePlaceholder, true
+			}
+			return r, true
+		},
 	})
 	if err != nil {
 		return nil, err
