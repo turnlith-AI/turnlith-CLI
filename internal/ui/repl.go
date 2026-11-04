@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,8 +17,13 @@ import (
 
 // The placeholder stands in for pasted newlines: readline submits on both
 // CR and LF, so LF is filtered into this rune to make multi-line paste land
-// in the buffer instead of firing one submission per line.
+// in the buffer instead of firing one submission per line. Only at a
+// terminal — on a pipe \n is the line terminator and must pass through.
 const newlinePlaceholder = '↵'
+
+// stdinIsTerminal is sampled once: pasted multi-line text only arrives at a
+// real terminal, and filtering \n elsewhere breaks piped input entirely.
+var stdinIsTerminal = IsTerminal(os.Stdin)
 
 // REPL is the interactive prompt: user input, permission answers, and
 // selection lists, all backed by one readline instance.
@@ -97,12 +103,12 @@ func NewREPL(renderer *Renderer, theme *Theme) (*REPL, error) {
 			}
 			return nil, 0, false
 		},
-		FuncFilterInputRune: func(r rune) (rune, bool) {
-			if r == '\n' {
-				return newlinePlaceholder, true
-			}
-			return r, true
-		},
+			FuncFilterInputRune: func(r rune) (rune, bool) {
+				if stdinIsTerminal && r == '\n' {
+					return newlinePlaceholder, true
+				}
+				return r, true
+			},
 	})
 	if err != nil {
 		return nil, err
