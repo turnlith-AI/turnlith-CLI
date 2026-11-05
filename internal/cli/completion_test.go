@@ -55,9 +55,14 @@ func TestCompletionScriptsListEveryFlagAndCommand(t *testing.T) {
 				t.Errorf("%s completion lacks command %s", shell, c)
 			}
 		}
-		for _, v := range []string{"stream-json", "plan", "xhigh"} {
+		for _, v := range []string{"xhigh", "opencode", "cline"} {
 			if !strings.Contains(script, v) {
 				t.Errorf("%s completion lacks the value %s", shell, v)
+			}
+		}
+		for _, gone := range []string{"--permission-mode", "--print", "--yolo", "stream-json"} {
+			if strings.Contains(script, gone) {
+				t.Errorf("%s completion still offers the removed %s", shell, gone)
 			}
 		}
 	}
@@ -79,16 +84,25 @@ func TestBashCompletionIsValidShell(t *testing.T) {
 	if out, err := exec.Command(bash, "-n", path).CombinedOutput(); err != nil {
 		t.Fatalf("bash -n: %v\n%s", err, out)
 	}
-	// and it really completes: source it and ask for "--perm"
-	probe := `source ` + path + `; COMP_WORDS=(tlc --perm); COMP_CWORD=1; _tlc; printf '%s\n' "${COMPREPLY[@]}"`
+	// and it really completes: source it and ask for "--ef"
+	probe := `source ` + path + `; COMP_WORDS=(tlc --ef); COMP_CWORD=1; _tlc; printf '%s\n' "${COMPREPLY[@]}"`
 	out, err := exec.Command(bash, "-c", probe).CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "--permission-mode") {
-		t.Fatalf("completing --perm gave %q (%v)", out, err)
+	if err != nil || !strings.Contains(string(out), "--effort") {
+		t.Fatalf("completing --ef gave %q (%v)", out, err)
 	}
-	probe = `source ` + path + `; COMP_WORDS=(tlc --permission-mode ""); COMP_CWORD=2; _tlc; printf '%s\n' "${COMPREPLY[@]}"`
+	probe = `source ` + path + `; COMP_WORDS=(tlc --effort ""); COMP_CWORD=2; _tlc; printf '%s\n' "${COMPREPLY[@]}"`
 	out, _ = exec.Command(bash, "-c", probe).CombinedOutput()
-	if !strings.Contains(string(out), "plan") || !strings.Contains(string(out), "yolo") {
-		t.Fatalf("mode values: %q", out)
+	if !strings.Contains(string(out), "high") || !strings.Contains(string(out), "xhigh") {
+		t.Fatalf("effort values: %q", out)
+	}
+	// the first word completes to a command, and install to a client
+	probe = `source ` + path + `; COMP_WORDS=(tlc ag); COMP_CWORD=1; _tlc; printf '%s\n' "${COMPREPLY[@]}"`
+	if out, _ = exec.Command(bash, "-c", probe).CombinedOutput(); !strings.Contains(string(out), "agents") {
+		t.Fatalf("command completion: %q", out)
+	}
+	probe = `source ` + path + `; COMP_WORDS=(tlc install cu); COMP_CWORD=2; _tlc; printf '%s\n' "${COMPREPLY[@]}"`
+	if out, _ = exec.Command(bash, "-c", probe).CombinedOutput(); !strings.Contains(string(out), "cursor") {
+		t.Fatalf("client completion: %q", out)
 	}
 }
 
@@ -100,17 +114,17 @@ func TestCompletionCommand(t *testing.T) {
 	if res = runTLC(t, t.TempDir(), "completion", "tcsh"); res.code != 2 || !strings.Contains(res.stderr, "bash, zsh, fish") {
 		t.Fatalf("unknown shell: code=%d stderr=%q", res.code, res.stderr)
 	}
-	if res = runTLC(t, t.TempDir(), "completion"); res.code != 2 || !strings.Contains(res.stderr, "usage") {
+	if res = runTLC(t, t.TempDir(), "completion"); res.code != 2 || !strings.Contains(res.stderr, "usage: tlc completion") {
 		t.Fatalf("no shell: code=%d stderr=%q", res.code, res.stderr)
 	}
 }
 
 func TestPerCommandHelp(t *testing.T) {
 	cases := map[string][]string{
-		"agents":     {"tlc agents create", "--effort"},
+		"agents":     {"tlc agents create", "--effort", "admin-role"},
 		"configure":  {"--api-key-stdin", "https://"},
 		"install":    {"opencode", "--use-env"},
-		"doctor":     {"connection", "Exit status"},
+		"doctor":     {"connection", "coding clients", "Exit status"},
 		"completion": {"bash", "zsh", "fish"},
 	}
 	for topic, wants := range cases {
@@ -133,5 +147,43 @@ func TestPerCommandHelp(t *testing.T) {
 	res := runTLC(t, t.TempDir(), "--help")
 	if res.code != 0 || !strings.Contains(res.stdout, "Usage:") {
 		t.Fatalf("global help: %d %q", res.code, res.stdout)
+	}
+}
+
+func TestHelpTextDescribesOnlyLiveCommands(t *testing.T) {
+	for _, c := range commands {
+		if c == "help" || c == "version" {
+			continue
+		}
+		if !strings.Contains(helpText, "tlc "+c) {
+			t.Errorf("help text does not mention `tlc %s`", c)
+		}
+	}
+	for _, gone := range []string{"--print", "--continue", "--yolo", "permission mode", "/permissions", "REPL", "/model ", "transcript", "TLC.md"} {
+		if strings.Contains(helpText, gone) {
+			t.Errorf("help text still mentions %q", gone)
+		}
+		for name, topic := range helpTopics {
+			if strings.Contains(topic, gone) {
+				t.Errorf("help topic %s still mentions %q", name, gone)
+			}
+		}
+	}
+}
+
+func TestEveryCommandHasATopCommandEntry(t *testing.T) {
+	listed := map[string]bool{}
+	for _, c := range topCommands {
+		listed[c.name] = true
+	}
+	for _, c := range commands {
+		if !listed[c] {
+			t.Errorf("command %s is not in topCommands (completion would miss it)", c)
+		}
+	}
+	for c := range listed {
+		if !contains(commands, c) {
+			t.Errorf("topCommands lists %s, which is not a command", c)
+		}
 	}
 }

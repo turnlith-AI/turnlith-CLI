@@ -1,9 +1,9 @@
 # Contributing
 
-Thanks for helping. `tlc` is a small Go program (~11k lines plus tests, four direct
-dependencies), and we want it to stay one: a capable agent
-without bloat. A change that adds a feature should also say what it costs in
-context, complexity or dependencies.
+Thanks for helping. `tlc` is a small Go program (two direct dependencies) that
+connects a turnlith workspace to the coding tools people already use, and we want
+it to stay small and dependable. A change that adds a feature should also say what
+it costs in complexity or dependencies.
 
 ## Setup
 
@@ -16,15 +16,15 @@ make build        # bin/tlc
 ```
 
 Everything runs offline: the tests drive the real `cli.Main` against an in-process
-fake of the turnlith server (`internal/cli/cli_test.go`). You never need a server
-or a key to develop.
+fake of the turnlith server (`internal/cli/cli_test.go`) and temp-dir homes for
+the coding clients. You never need a server or a key to develop.
 
 ## How the code is organised
 
 See [docs/architecture.md](docs/architecture.md). The short version: `internal/cli`
-wires things, `internal/agent` runs the tool loop, `internal/tools` are the tools,
-`internal/permissions` decides what may run, `internal/ui` draws, `internal/api`
-talks to the server.
+parses arguments and runs the commands, `internal/api` talks to the server,
+`internal/harness` knows how to configure each coding client, `internal/config`
+owns the saved connection, `internal/ui` draws.
 
 ## Changing things
 
@@ -34,21 +34,21 @@ requirements; keep it that way.
 
 Where things go:
 
-- **A new tool** — implement `tools.Tool` in `internal/tools`; add `ConcurrencySafe()`
-  if it is read-only and stateless, `NeedsPermission` (`tools.ArgGater`) if it
-  touches paths, `Prepare`/`RunResult` if it should preview or show a diff;
-  register it in `newApp`; teach `ui.ToolCallSummary` and `ui.summarizeResult`
-  how to show it; add it to the README tool table.
-- **A slash command** — add the entry to `ui.Commands` (the menu, `/help` and TAB
-  completion) *and* the handler to `slashHandlers`; a test fails if they differ.
-- **A flag** — add it to `boolFlags`/`valueFlags`, to `helpText` and to `flagHelp`;
-  tests fail if the help or the shell completions miss it.
-- **Permissions** — rules and modes live in `internal/permissions`. Anything that
-  could widen what runs without asking needs a test showing it cannot be abused
-  (chained commands, substitution, symlinks, paths outside the workspace).
-- **Output** — keep stdout machine-readable in `-p` mode; everything human goes to
-  stderr there. The streaming renderer must stay chunk-invariant (there is a fuzz
-  test: `go test ./internal/ui -fuzz FuzzStylerChunkInvariance`).
+- **A new coding client** — add one entry to the registry in `internal/harness`
+  (`Registry()`): its config paths, `Detect`, `Install`, `Uninstall`, `Inspect`,
+  and `ManualSteps` for anything it keeps in app state. Cover install, re-install
+  (byte-stable), uninstall (removes exactly what was added) and a pre-existing
+  config with comments and other entries. Then check `docs/reference.md`, the
+  console's client list and the docs site mention it.
+- **A command or flag** — add it to `commands` and `topCommands`, or to
+  `boolFlags`/`valueFlags`, then to `helpText` and `flagHelp`; tests fail if the
+  help or the shell completions miss it.
+- **Anything that writes a file** — write atomically, use the least permissive mode
+  that works, and never overwrite something tlc did not create. Add a test with a
+  pre-existing file.
+- **Anything that prints server text** — pass it through `ui.SanitizeInline` or
+  `ui.SanitizeBlock`.
+- **Output** — stdout is data, stderr is for errors, warnings and notices.
 
 Conventions: standard `gofmt`; errors say what to do next; comments explain *why*;
 no new dependency without a discussion — the binary is built with `CGO_ENABLED=0`
@@ -56,9 +56,10 @@ for six platforms and must stay buildable that way (`make cross`).
 
 ## Trying the interface
 
-Unit tests cannot see a terminal. For UI work, run the real binary against a
-scripted fake server in a pseudo-terminal and look at the output; the test fake
-in `internal/cli/cli_test.go` shows the wire format to emulate. Remember readline
+Unit tests cannot see a terminal. For the interactive prompts (`configure`,
+`agents create`), run the real binary against a scripted fake server in a
+pseudo-terminal and look at the output; the test fake in
+`internal/cli/cli_test.go` shows the wire format to emulate. Remember readline
 asks the terminal for the cursor position (`ESC[6n`) and waits for the reply.
 
 ## Pull requests

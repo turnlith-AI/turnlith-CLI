@@ -1,8 +1,7 @@
 // Package config resolves the connection tlc uses to reach a turnlith
 // server. The connection (baseUrl + apiKey) lives at
 // ~/.config/tlith/config.json — the path the retired tlith setup helper
-// used, kept so existing setups keep working; tlc-specific preferences live
-// next to it in tlc.json.
+// used, kept so existing setups keep working.
 package config
 
 import (
@@ -13,13 +12,13 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
 const (
 	EnvBaseURL = "TLITH_BASE_URL"
 	EnvAPIKey  = "TLITH_API_KEY"
-	EnvAgent   = "TLC_AGENT"
 	// EnvAllowInsecure=1 permits plain http to a non-loopback server, for
 	// networks the operator trusts (a VPN, a private LAN).
 	EnvAllowInsecure = "TLC_ALLOW_INSECURE"
@@ -29,14 +28,6 @@ const (
 type Connection struct {
 	BaseURL string
 	APIKey  string
-}
-
-// Prefs are tlc-local preferences.
-type Prefs struct {
-	DefaultAgent string `json:"defaultAgent,omitempty"`
-	// Projects holds per-project choices, keyed by the project's canonical
-	// root directory (see ProjectPrefs).
-	Projects map[string]ProjectPrefs `json:"projects,omitempty"`
 }
 
 // ErrNotConfigured reports a missing connection with setup guidance.
@@ -64,21 +55,6 @@ func configDir() string {
 
 // ConnectionPath is the shared tlith connection file.
 func ConnectionPath() string { return filepath.Join(configDir(), "config.json") }
-
-// PrefsPath is tlc's own preferences file.
-func PrefsPath() string { return filepath.Join(configDir(), "tlc.json") }
-
-// StateDir is where transcripts live.
-func StateDir() string {
-	base := os.Getenv("XDG_DATA_HOME")
-	if base == "" {
-		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".local", "share")
-	}
-	dir := filepath.Join(base, "tlith", "tlc")
-	_ = os.MkdirAll(dir, 0o700)
-	return dir
-}
 
 // NormalizeBaseURL trims whitespace and trailing slashes and adds a scheme
 // when one is missing (https, except for localhost).
@@ -188,10 +164,13 @@ func readConnectionFile() (Connection, error) {
 }
 
 // SaveConnection writes the shared connection file (mode 600), preserving
-// keys other tools may have stored there.
+// keys other tools may have stored there. The file is replaced atomically and
+// its mode is forced to 600 even when an older, looser file was there, so the
+// key is never readable by other users — not even for an instant.
 func SaveConnection(conn Connection) (string, error) {
 	path := ConnectionPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	fields := map[string]any{}
@@ -204,30 +183,30 @@ func SaveConnection(conn Connection) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp") // created 0600
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return "", err
+	}
+	if err := tmp.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
+		_ = tmp.Close()
+		cleanup()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
 		return "", err
 	}
 	return path, nil
-}
-
-// LoadPrefs never fails; unreadable prefs are treated as empty.
-func LoadPrefs() Prefs {
-	var prefs Prefs
-	if data, err := os.ReadFile(PrefsPath()); err == nil {
-		_ = json.Unmarshal(data, &prefs)
-	}
-	return prefs
-}
-
-// SavePrefs persists tlc preferences.
-func SavePrefs(prefs Prefs) error {
-	path := PrefsPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(prefs, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0o600)
 }

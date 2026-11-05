@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"reflect"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -21,53 +21,97 @@ func TestEveryFlagIsDocumentedInHelp(t *testing.T) {
 	}
 }
 
-func TestParseArgsPermissionAndPrintFlags(t *testing.T) {
-	opts, err := parseArgs([]string{
-		"-p", "--permission-mode", "auto",
-		"--allowed-tools", "Bash(go test:*),Edit(docs/**)",
-		"--allowed-tools=Write",
-		"--disallowed-tools", "Bash(git push:*)",
-		"--max-turns", "5", "--output-format=json",
-		"do", "the", "thing",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !opts.print || opts.permissionMode != "auto" || opts.maxTurns != 5 || opts.outputFormat != "json" {
-		t.Fatalf("opts = %+v", opts)
-	}
-	if want := []string{"Bash(go test:*)", "Edit(docs/**)", "Write"}; !reflect.DeepEqual(opts.allowedTools, want) {
-		t.Fatalf("allowed = %v, want %v", opts.allowedTools, want)
-	}
-	if want := []string{"Bash(git push:*)"}; !reflect.DeepEqual(opts.disallowedTools, want) {
-		t.Fatalf("disallowed = %v", opts.disallowedTools)
-	}
-	if opts.prompt != "do the thing" {
-		t.Fatalf("prompt = %q", opts.prompt)
-	}
-}
-
-func TestParseArgsRejectsBadValues(t *testing.T) {
-	for _, argv := range [][]string{
-		{"--max-turns", "0"},
-		{"--max-turns", "many"},
-		{"--output-format", "xml"},
-		{"--agent"},
-		{"--output-format"},
-		{"--bogus"},
-		{"--print=yes"}, // a switch takes no value
-	} {
-		if _, err := parseArgs(argv); err == nil {
-			t.Errorf("%v should be rejected", argv)
+func TestEveryRemovedFlagIsNotAlsoLive(t *testing.T) {
+	for name := range removedFlags {
+		if _, ok := boolFlags[name]; ok {
+			t.Errorf("%s is both removed and live", name)
+		}
+		if _, ok := valueFlags[name]; ok {
+			t.Errorf("%s is both removed and live", name)
 		}
 	}
 }
 
-func TestSplitRulesIgnoresCommasInsideParens(t *testing.T) {
-	got := splitRules("Bash(echo a,b),Edit, ,Write(*.md)")
-	want := []string{"Bash(echo a,b)", "Edit", "Write(*.md)"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %q want %q", got, want)
+func TestParseArgsRejectsBadInvocations(t *testing.T) {
+	for _, argv := range [][]string{
+		{"configure", "--base-url"}, // value missing
+		{"--bogus"},
+		{"doctor", "--list=yes"},            // a switch takes no value
+		{"configure", "extra"},              // takes no argument
+		{"doctor", "now"},                   // takes no argument
+		{"version", "-p"},                   // removed flags win over -v
+		{"completion", "bash", "zsh"},       // one shell only
+		{"help", "nonsense"},                // no such topic
+		{"agents", "create", "a", "prompt"}, // stray words
+		{"-p", "hello"},
+		{"hello"},
+	} {
+		_, err := parseArgs(argv)
+		var usage *usageError
+		if err == nil || !errors.As(err, &usage) {
+			t.Errorf("%v should be a usage error, got %v", argv, err)
+		}
+	}
+}
+
+func TestParseArgsCommandsAndHelp(t *testing.T) {
+	cases := []struct {
+		argv    []string
+		command string
+		topic   string
+	}{
+		{nil, "help", ""},
+		{[]string{"help"}, "help", ""},
+		{[]string{"help", "install"}, "help", "install"},
+		{[]string{"-h"}, "help", ""},
+		{[]string{"agents", "--help"}, "help", "agents"},
+		{[]string{"agents", "create", "-h"}, "help", "agents"},
+		{[]string{"install", "cursor", "--help"}, "help", "install"},
+		{[]string{"-v"}, "version", ""},
+		{[]string{"version"}, "version", ""},
+		{[]string{"--version", "doctor"}, "version", ""},
+		{[]string{"configure"}, "configure", ""},
+		{[]string{"doctor"}, "doctor", ""},
+		{[]string{"--base-url", "https://x", "configure"}, "configure", ""}, // flags may come first
+		{[]string{"completion", "zsh"}, "completion", ""},
+	}
+	for _, c := range cases {
+		opts, err := parseArgs(c.argv)
+		if err != nil {
+			t.Errorf("%v: %v", c.argv, err)
+			continue
+		}
+		if opts.command != c.command || opts.helpTopic != c.topic {
+			t.Errorf("%v: command=%q topic=%q, want %q %q", c.argv, opts.command, opts.helpTopic, c.command, c.topic)
+		}
+	}
+	if opts, _ := parseArgs([]string{"completion", "fish"}); opts.shell != "fish" {
+		t.Errorf("shell = %q", opts.shell)
+	}
+}
+
+func TestUnknownCommandSuggestions(t *testing.T) {
+	for typo, want := range map[string]string{
+		"agnts": "agents", "instal": "install", "unistall": "uninstall", "docter": "doctor",
+		"configur": "configure", "completon": "completion",
+	} {
+		_, err := parseArgs([]string{typo})
+		if err == nil || !strings.Contains(err.Error(), "`tlc "+want+"`") {
+			t.Errorf("%q: err = %v, want a suggestion for %q", typo, err, want)
+		}
+	}
+	if _, err := parseArgs([]string{"zzzzzz"}); err == nil || strings.Contains(err.Error(), "did you mean") {
+		t.Errorf("a word nothing resembles must not get a suggestion: %v", err)
+	}
+	if got := editDistance("kitten", "sitting"); got != 3 {
+		t.Errorf("editDistance = %d", got)
+	}
+}
+
+func TestParseArgsDoubleDashEndsFlags(t *testing.T) {
+	// after "--" nothing is a flag, so "--list" is just a (bad) client name
+	if _, err := parseArgs([]string{"install", "--", "--list"}); err == nil {
+		t.Fatal("--list after -- must be treated as a word")
 	}
 }
 
@@ -78,10 +122,6 @@ func TestParseArgsKeepsPositionalBehavior(t *testing.T) {
 	}
 	opts, err = parseArgs([]string{"install", "opencode", "--project", "--use-env"})
 	if err != nil || opts.command != "install" || strings.Join(opts.clients, ",") != "opencode" || !opts.project || !opts.useEnv {
-		t.Fatalf("opts=%+v err=%v", opts, err)
-	}
-	opts, err = parseArgs([]string{"--", "--not-a-flag", "word"})
-	if err != nil || opts.prompt != "--not-a-flag word" {
 		t.Fatalf("opts=%+v err=%v", opts, err)
 	}
 }

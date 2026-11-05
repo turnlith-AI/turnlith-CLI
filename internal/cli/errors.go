@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -10,19 +11,18 @@ import (
 
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
 	"github.com/turnlith-AI/turnlith-CLI/internal/config"
+	"github.com/turnlith-AI/turnlith-CLI/internal/ui"
 )
 
-// friendlyErr translates API errors into actionable messages.
-func friendlyErr(err error) string {
+// friendlyErr translates API errors into actionable messages. The result is
+// safe to print: whatever the server put in its message has its terminal
+// control characters removed.
+func friendlyErr(err error) string { return ui.SanitizeBlock(describeErr(err)) }
+
+func describeErr(err error) string {
 	var notConfigured *config.ErrNotConfigured
 	if errors.As(err, &notConfigured) {
 		return err.Error()
-	}
-	switch {
-	case errors.Is(err, api.ErrTruncatedStream):
-		return "the connection ended before the answer was complete — send the prompt again (the agent's server-side memory is intact)"
-	case errors.Is(err, api.ErrStreamStalled):
-		return "the server stopped sending data mid-answer — check that it is healthy, or raise " + api.EnvStreamIdleTimeout + " for very slow models"
 	}
 	var apiErr *api.APIError
 	if errors.As(err, &apiErr) {
@@ -36,16 +36,15 @@ func friendlyErr(err error) string {
 		case 402:
 			return "insufficient credits on the turnlith account: " + apiErr.Message
 		case 403:
-			return "this api key cannot manage agents — creating agents, switching models and setting effort need an admin-role key (mint one in the console under API keys, or edit the agent there)"
-		case 404:
-			if apiErr.Code == "model_not_found" {
-				return apiErr.Message + " — run `tlc agents` to list the workspace's agents"
-			}
+			return "this api key is not allowed to do that — creating agents needs an admin-role key (mint one in the console under API keys, or create the agent there)"
 		}
 		return err.Error()
 	}
 	if errors.Is(err, io.EOF) {
 		return "the server closed the connection unexpectedly"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "the request timed out — is the server reachable?"
 	}
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {

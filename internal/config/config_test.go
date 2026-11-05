@@ -102,21 +102,78 @@ func TestConnectionRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPrefsRoundTrip(t *testing.T) {
+func TestSaveConnectionTightensAnExistingLooseFile(t *testing.T) {
 	isolate(t)
-	prefs := LoadPrefs()
-	if prefs.DefaultAgent != "" {
-		t.Fatalf("prefs = %+v", prefs)
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits")
 	}
-	prefs.DefaultAgent = "helper"
-	if err := SavePrefs(prefs); err != nil {
+	path := ConnectionPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if got := LoadPrefs().DefaultAgent; got != "helper" {
-		t.Fatalf("agent = %q", got)
+	// an older, world-readable file that also holds a key another tool owns
+	if err := os.WriteFile(path, []byte(`{"baseUrl":"https://old","apiKey":"sk-old","other":"keep-me"}`), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if filepath.Base(PrefsPath()) != "tlc.json" {
-		t.Fatalf("prefs path = %s", PrefsPath())
+	if _, err := SaveConnection(Connection{BaseURL: "https://turnlith.com", APIKey: "sk-new"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, the key must not stay world-readable", info.Mode().Perm())
+	}
+	data, _ := os.ReadFile(path)
+	for _, want := range []string{"sk-new", "https://turnlith.com", "keep-me"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("saved file lost %q:\n%s", want, data)
+		}
+	}
+	if strings.Contains(string(data), "sk-old") {
+		t.Fatalf("old key still present:\n%s", data)
+	}
+	// no temp file is left behind
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	for _, e := range entries {
+		if e.Name() != "config.json" {
+			t.Fatalf("stray file %q next to the config", e.Name())
+		}
+	}
+}
+
+func TestLoadConnectionRejectsACorruptFile(t *testing.T) {
+	isolate(t)
+	t.Setenv(EnvBaseURL, "")
+	t.Setenv(EnvAPIKey, "")
+	if err := os.MkdirAll(filepath.Dir(ConnectionPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ConnectionPath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConnection()
+	if err == nil || !strings.Contains(err.Error(), "invalid config") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLoadConnectionNeedsBothHalves(t *testing.T) {
+	isolate(t)
+	t.Setenv(EnvBaseURL, "")
+	t.Setenv(EnvAPIKey, "sk-env")
+	// only the key is in the environment and there is no file: not configured
+	if _, err := LoadConnection(); err == nil {
+		t.Fatal("expected ErrNotConfigured")
+	}
+	// the file supplies the URL, the environment the key
+	if _, err := SaveConnection(Connection{BaseURL: "https://turnlith.com", APIKey: "sk-file"}); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := LoadConnection()
+	if err != nil || conn.BaseURL != "https://turnlith.com" || conn.APIKey != "sk-env" {
+		t.Fatalf("conn=%+v err=%v", conn, err)
 	}
 }
 

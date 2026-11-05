@@ -1,5 +1,6 @@
-// Command tlc is a Claude-Code-style coding agent for the terminal, backed by
-// a turnlith server (session-bound inference: the server owns the context).
+// Command tlc connects a turnlith workspace to the coding tools you already
+// use: it saves and verifies the connection, manages agents, wires them into
+// opencode, Pi, Continue, Cursor and Cline, and diagnoses the setup.
 package main
 
 import (

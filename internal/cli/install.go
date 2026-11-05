@@ -7,11 +7,9 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
-	"github.com/turnlith-AI/turnlith-CLI/internal/api"
 	"github.com/turnlith-AI/turnlith-CLI/internal/config"
 	"github.com/turnlith-AI/turnlith-CLI/internal/harness"
 	"github.com/turnlith-AI/turnlith-CLI/internal/ui"
@@ -99,15 +97,15 @@ func providerIDOf(opts options) string {
 // reportSelection prints the skipped clients and decides whether to go on.
 // It returns an exit code and whether the caller should stop. quiet turns
 // "nothing to do" into a silent success (install --if-detected).
-func reportSelection(renderer *ui.Renderer, theme *ui.Theme, sel selection, explicit, quiet bool, verb string) (int, bool) {
+func reportSelection(con console, sel selection, explicit, quiet bool, verb string) (int, bool) {
 	if len(sel.run) == 0 && explicit {
 		for _, s := range sel.skipped {
-			renderer.Errorf("cannot %s %s: %s", verb, s.client.Display, s.why)
+			con.err.Errorf("cannot %s %s: %s", verb, s.client.Display, s.why)
 		}
 		return 2, true
 	}
 	for _, s := range sel.skipped {
-		renderer.Infof("%s", theme.Yellow(fmt.Sprintf("skipping %s: %s", s.client.Display, s.why)))
+		con.out.Infof("%s", con.theme.Yellow(fmt.Sprintf("skipping %s: %s", s.client.Display, s.why)))
 	}
 	switch {
 	case len(sel.run) > 0:
@@ -115,71 +113,64 @@ func reportSelection(renderer *ui.Renderer, theme *ui.Theme, sel selection, expl
 	case quiet:
 		return 0, true
 	case len(sel.skipped) > 0:
-		renderer.Errorf("nothing to %s — every candidate client was skipped", verb)
+		con.err.Errorf("nothing to %s — every candidate client was skipped", verb)
 		return 2, true
 	case verb == "install":
-		renderer.Errorf("no supported client detected — name one: tlc install <%s>", strings.Join(harness.Names(), "|"))
+		con.err.Errorf("no supported client detected — name one: tlc install <%s>", strings.Join(harness.Names(), "|"))
 		return 2, true
 	}
-	renderer.Infof("No turnlith entries found in any supported client — nothing to remove.")
+	con.out.Infof("No turnlith entries found in any supported client — nothing to remove.")
 	return 0, true
 }
 
 func runInstall(opts options) int {
-	theme := ui.NewTheme()
-	renderer := ui.NewRenderer(os.Stdout, theme)
+	con := newConsole()
 
 	if opts.list {
-		return runInstallList(renderer, theme, opts)
+		return runInstallList(con, opts)
 	}
 
 	sel, explicit := pickClients(opts, false)
-	if code, stop := reportSelection(renderer, theme, sel, explicit, opts.ifDetected && !explicit, "install"); stop {
+	if code, stop := reportSelection(con, sel, explicit, opts.ifDetected && !explicit, "install"); stop {
 		return code
 	}
 
-	conn, err := config.LoadConnection()
+	conn, err := resolveConnection(opts)
 	if err != nil {
-		renderer.Errorf("%s", friendlyErr(err))
+		con.err.Errorf("%s", friendlyErr(err))
 		return 1
 	}
-	if opts.baseURL != "" {
-		conn.BaseURL = config.NormalizeBaseURL(opts.baseURL)
-	}
-	if opts.apiKey != "" {
-		conn.APIKey = strings.TrimSpace(opts.apiKey)
-	}
 
-	// MCP-only clients need no agent list, so skip the round trip for them.
-	var models []harness.AgentModel
-	if anyProvider(sel.run) {
-		client := api.New(conn.BaseURL, conn.APIKey)
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		agents, err := client.ListAgents(ctx)
-		if err != nil {
-			renderer.Errorf("%s", friendlyErr(err))
-			return 1
+	// Always ask the server for the agents, even for clients that only take
+	// the MCP server: it proves the URL and key work before they are written
+	// into a config, and Cursor/Cline print the agent names for the model
+	// settings they keep in the app.
+	client := newClient(conn, con)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	agents, err := client.ListAgents(ctx)
+	if err != nil {
+		con.err.Errorf("%s", friendlyErr(err))
+		return 1
+	}
+	models := make([]harness.AgentModel, 0, len(agents))
+	for _, ag := range agents {
+		label := ""
+		if ag.Label != nil {
+			label = strings.TrimSpace(*ag.Label)
 		}
-		models = make([]harness.AgentModel, 0, len(agents))
-		for _, ag := range agents {
-			label := ""
-			if ag.Label != nil {
-				label = strings.TrimSpace(*ag.Label)
-			}
-			models = append(models, harness.AgentModel{Codename: ag.Codename, Label: label})
-		}
+		models = append(models, harness.AgentModel{Codename: ag.Codename, Label: label})
 	}
 
 	failed := false
 	for i, c := range sel.run {
 		if len(sel.run) > 1 {
 			if i > 0 {
-				renderer.Infof("")
+				con.out.Infof("")
 			}
-			renderer.Infof("%s", theme.Bold(c.Display))
+			con.out.Infof("%s", con.theme.Bold(c.Display))
 		}
-		if !installOne(renderer, theme, c, opts, conn, models) {
+		if !installOne(con, c, opts, conn, models) {
 			failed = true
 		}
 	}
@@ -189,18 +180,9 @@ func runInstall(opts options) int {
 	return 0
 }
 
-func anyProvider(clients []harness.Client) bool {
-	for _, c := range clients {
-		if c.Caps.Provider {
-			return true
-		}
-	}
-	return false
-}
-
 // installOne installs into one client and prints what happened; it reports
 // whether the install succeeded.
-func installOne(renderer *ui.Renderer, theme *ui.Theme, c harness.Client, opts options, conn config.Connection, models []harness.AgentModel) bool {
+func installOne(con console, c harness.Client, opts options, conn config.Connection, models []harness.AgentModel) bool {
 	providerID := providerIDOf(opts)
 	req := harness.Request{
 		Project:     opts.project,
@@ -214,72 +196,72 @@ func installOne(renderer *ui.Renderer, theme *ui.Theme, c harness.Client, opts o
 	}
 	result, err := c.Install(req)
 	if err != nil {
-		renderer.Errorf("could not write the %s config: %v", c.ID, err)
+		con.err.Errorf("could not write the %s config: %v", c.ID, err)
 		return false
 	}
 
 	if opts.providerID != "" && !c.Caps.ProviderID {
-		renderer.Infof("%s", theme.Dim("--provider-id ignored: "+c.Display+" has no provider entry to name"))
+		con.out.Infof("%s", con.theme.Dim("--provider-id ignored: "+c.Display+" has no provider entry to name"))
 	}
 	for _, f := range result.Files {
 		state := "updated"
 		if f.Created {
 			state = "created"
 		}
-		renderer.Infof("%s %s", theme.Dim(c.ID+" config:"), f.Path+" ("+state+")")
+		con.out.Infof("%s %s", con.theme.Dim(c.ID+" config:"), f.Path+" ("+state+")")
 	}
 	if c.Caps.Provider {
-		renderer.Infof("%s %s", theme.Dim("provider:"), providerID+" → "+conn.BaseURL+"/v1")
+		con.out.Infof("%s %s", con.theme.Dim("provider:"), providerID+" → "+conn.BaseURL+"/v1")
 	}
 	if req.WithMCP {
-		renderer.Infof("%s %s", theme.Dim("mcp server:"),
+		con.out.Infof("%s %s", con.theme.Dim("mcp server:"),
 			harness.DefaultMCPServerID+" → "+conn.BaseURL+"/v1/mcp (memory search tools)")
 	}
 	if c.Caps.Provider {
-		renderer.Infof("%s %d", theme.Dim("agents:"), result.AgentCount)
+		con.out.Infof("%s %d", con.theme.Dim("agents:"), result.AgentCount)
 		for _, m := range models {
-			line := "  - " + m.Codename
+			line := "  - " + ui.SanitizeInline(m.Codename)
 			if m.Label != "" {
-				line += " (" + m.Label + ")"
+				line += " (" + ui.SanitizeInline(m.Label) + ")"
 			}
-			renderer.Infof("%s", theme.Dim(line))
+			con.out.Infof("%s", con.theme.Dim(line))
 		}
 		if result.AgentCount == 0 {
-			renderer.Infof("%s", theme.Yellow("no agents on the server yet — rerun `tlc install "+c.ID+"` after creating one"))
+			con.out.Infof("%s", con.theme.Yellow("no agents on the server yet — rerun `tlc install "+c.ID+"` after creating one"))
 		}
 	}
 	if opts.useEnv {
-		renderer.Infof("%s %s", theme.Dim("api key:"),
+		con.out.Infof("%s %s", con.theme.Dim("api key:"),
 			c.EnvRef+" — export "+config.EnvAPIKey+"=<key> in your shell")
 	}
 	if c.ManualSteps != nil {
 		for _, line := range c.ManualSteps(conn.BaseURL, models) {
-			renderer.Infof("%s", theme.Yellow(line))
+			con.out.Infof("%s", con.theme.Yellow(ui.SanitizeBlock(line)))
 		}
 	}
-	renderer.Infof("%s", theme.Dim(c.Hint))
+	con.out.Infof("%s", con.theme.Dim(c.Hint))
 	return true
 }
 
 // runInstallList is `tlc install --list`: offline, changes nothing.
-func runInstallList(renderer *ui.Renderer, theme *ui.Theme, opts options) int {
+func runInstallList(con console, opts options) int {
 	providerID := providerIDOf(opts)
 	for _, c := range harness.Registry() {
-		detected := theme.Dim("not detected")
+		detected := con.theme.Dim("not detected")
 		if c.Detect() {
-			detected = theme.Green("detected")
+			detected = con.theme.Green("detected")
 		}
-		renderer.Infof("%s  %s  %s", theme.Bold(c.ID), detected, theme.Dim("writes "+capabilitySummary(c)))
+		con.out.Infof("%s  %s  %s", con.theme.Bold(c.ID), detected, con.theme.Dim("writes "+capabilitySummary(c)))
 		if opts.project && !c.Caps.Project {
-			renderer.Infof("%s", theme.Dim("    no project-level config"))
+			con.out.Infof("%s", con.theme.Dim("    no project-level config"))
 			continue
 		}
 		states := c.Inspect(opts.project, providerID, harness.DefaultMCPServerID)
 		if len(states) == 0 {
-			renderer.Infof("%s", theme.Dim("    no "+c.Display+" install found"))
+			con.out.Infof("%s", con.theme.Dim("    no "+c.Display+" install found"))
 		}
 		for _, f := range states {
-			renderer.Infof("%s", theme.Dim("    "+f.Path+" — "+fileSummary(f)))
+			con.out.Infof("%s", con.theme.Dim("    "+f.Path+" — "+fileSummary(f)))
 		}
 	}
 	return 0
@@ -313,11 +295,10 @@ func fileSummary(f harness.FileState) string {
 }
 
 func runUninstall(opts options) int {
-	theme := ui.NewTheme()
-	renderer := ui.NewRenderer(os.Stdout, theme)
+	con := newConsole()
 
 	sel, explicit := pickClients(opts, true)
-	if code, stop := reportSelection(renderer, theme, sel, explicit, false, "uninstall"); stop {
+	if code, stop := reportSelection(con, sel, explicit, false, "uninstall"); stop {
 		return code
 	}
 
@@ -330,17 +311,17 @@ func runUninstall(opts options) int {
 			MCPServerID: harness.DefaultMCPServerID,
 		})
 		if err != nil {
-			renderer.Errorf("could not update the %s config: %v", c.ID, err)
+			con.err.Errorf("could not update the %s config: %v", c.ID, err)
 			failed = true
 			continue
 		}
 		switch outcome {
 		case harness.OutcomeRemoved:
-			renderer.Infof("Removed %s from the %s config.", removedWhat(c, providerID), c.ID)
+			con.out.Infof("Removed %s from the %s config.", removedWhat(c, providerID), c.ID)
 		case harness.OutcomeNotInstalled:
-			renderer.Infof("%s is not in the %s config — nothing to remove.", subject(c, providerID), c.ID)
+			con.out.Infof("%s is not in the %s config — nothing to remove.", subject(c, providerID), c.ID)
 		default:
-			renderer.Infof("No %s config found — nothing to remove.", c.ID)
+			con.out.Infof("No %s config found — nothing to remove.", c.ID)
 		}
 	}
 	if failed {

@@ -17,4 +17,4 @@ labels: bug
 
 **Version and platform** (`tlc version`, OS, terminal)
 
-**Anything else** (a transcript snippet helps; remove secrets first)
+**Anything else** (the command you ran and what it printed; remove secrets first)

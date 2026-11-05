@@ -5,43 +5,40 @@ versions follow [semantic versioning](https://semver.org/) (pre-1.0: minor versi
 
 ## [Unreleased]
 
-### Security
-- File tools ask before touching anything outside the working directory (judged after symlink resolution), and `auto` mode no longer waves such edits through.
-- Credential stores (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, cloud/registry tokens and tlc's own `~/.config/tlith`, which holds the api key) are refused by the file tools in every mode, `yolo` included.
-- Plain `http://` to a non-loopback server is refused unless `TLC_ALLOW_INSECURE=1`; `localhost.evil.com` no longer counts as localhost. `--api-key-stdin` for `tlc configure`; `--api-key` warns that it is visible in the process list.
-- Tab on an empty prompt can no longer reach `yolo`.
-- A repository's `.tlc/settings.json` can add deny rules but never allow rules.
-- `/status` masks short api keys too.
+`tlc` is now a **setup and control CLI** for a turnlith workspace. The built-in
+terminal coding agent is gone; use your turnlith agents from opencode, Pi,
+Continue, Cursor or Cline instead (`tlc install` wires them up). Because 0.2.0 is
+the last release that includes the agent, the next release should be 0.3.0.
+
+### Removed (breaking)
+- **The coding agent**: the interactive session, `tlc "prompt"`, print mode (`-p`, `--output-format`, `--max-turns`), `-c` / `/resume`, the `Read`/`Write`/`Edit`/`Bash`/`Glob`/`Grep`/`SearchMemory`/`TodoWrite` tools, permission modes and rules (`--yolo`, `--permission-mode`, `--allowed-tools`, `--disallowed-tools`, `.tlc/settings.json`), project instruction files (`TLC.md`), slash commands, `@file` mentions, local transcripts and the default-agent preference (`--agent`, `TLC_AGENT`, `tlc.json`).
+- Their leftovers on disk are no longer used and can be deleted: `~/.config/tlith/tlc.json`, `~/.local/share/tlith/tlc/`.
+- Passing any of the removed flags now fails with an explanation (exit 2) rather than a generic "unknown flag".
+
+### Changed
+- `tlc` with no arguments prints help (it used to start a session). A word that is not a command is an error with a "did you mean" hint (it used to be sent as a prompt).
+- `tlc install` with no client name wires **every detected client** (it used to look only for opencode), and `tlc uninstall` with no name removes the turnlith entries from every client that has them. A flag a client cannot honour (e.g. `--project` for Pi) skips that client with a note, or is a usage error when it is the only one named.
+- `tlc install` always asks the server for the agents first — even for MCP-only clients — so a wrong URL or key is caught before any client config is written.
+- `tlc doctor` now checks what `tlc` is for: connection, server, key, each agent's provider credentials, the connection file's permissions, and every detected coding client (installed or not). The terminal/shell/git/ripgrep/instructions checks are gone.
+- Errors, warnings and retry notices go to stderr; stdout carries only results.
+- Requests to `agents`, `configure` and `install` are now retried on 429/502/503 and refused connections (announced on stderr); `doctor` still fails fast.
 
 ### Added
 - **More coding clients**: `tlc install` now wires the turnlith agents into **Pi**, **Continue**, **Cursor** and **Cline**, not just opencode. Pi and Continue get the agents as models; Cursor and Cline get the `turnlith-controller` MCP server and print the model settings they keep in the app. `tlc install cursor pi` takes several names (or `all`), `tlc install --list` shows what is detected and installed, `--if-detected` makes the call a quiet no-op when nothing is found, and the one-paste `install.sh` now wires every detected client.
-- **Permission rules**: `Bash(go test:*)`, `Edit(docs/**)`, … via `--allowed-tools` / `--disallowed-tools`, `p` ("always in this project", stored in the user's config) and the repo's deny list. An "always" answer now remembers the command prefix, not all of Bash. Chained commands must match segment by segment; substitution and redirection are never covered by an allow rule. Deny rules win over everything, `--yolo` included. Read-only builtins (`git status|diff|log|show`, `ls`, `pwd`, …) no longer prompt.
-- **Project instructions**: `TLC.md` / `AGENTS.md` / `CLAUDE.md` (plus `~/.config/tlith/TLC.md`) are loaded into the system prompt, capped and announced; `/init` has the agent write `TLC.md`.
-- **Plan mode** (`--permission-mode plan`): read-only; refusals explain themselves to the model.
-- `TodoWrite` checklist tool; adjacent read-only tool calls run in parallel.
-- Numbered, colored **diffs** for Edit/Write in the transcript and in the permission prompt; an edit that cannot apply returns to the model without prompting.
-- `/undo`, `/diff`, `/copy`, `/resume`, `/edit`, `/doctor`; `\` line continuation; denial reasons passed to the model; a cost line after every prompt.
 - `tlc doctor`, `tlc completion bash|zsh|fish`, per-command help (`tlc agents --help`).
-- Print mode: `--output-format json|stream-json`, `--max-turns`, `--permission-mode`; exit status `0`/`1`/`130`; piped stdin is appended to the prompt.
-- Streaming markdown: headings, bullets, block quotes.
+- `tlc agents create` checks that the model is available in the workspace and that the effort suits its provider before sending anything.
 - CI: race detector, Windows/macOS/arm64 vet+build, `go mod tidy` check, Dependabot.
 
-### Changed
-- `tlc install` with no client name now wires **every detected client** (it used to look only for opencode), and `tlc uninstall` with no name removes the turnlith entries from every client that has them (it used to assume opencode). A flag a client cannot honour (e.g. `--project` for Pi) skips that client with a note, or is a usage error when it is the only one named.
-- `-p` exits `1` when the run fails (it always exited `0`).
-- Tool results are summarized in the transcript ("Read 120 lines"); long `Bash` output keeps its head *and* tail.
-- `-c` prefers the latest session with the current agent.
-- `cli.go` split into focused files; slash commands dispatch through a registry tied to the menu by a test; flag parsing is table-driven.
+### Security
+- Plain `http://` to a non-loopback server is refused unless `TLC_ALLOW_INSECURE=1`, in every command including when the URL comes from `--base-url`; `localhost.evil.com` no longer counts as localhost. `--api-key-stdin` for `tlc configure`; `--api-key` warns that it is visible in the process list.
+- The connection file is replaced atomically and forced to mode 600, so an older world-readable `config.json` no longer keeps a new key readable by other users.
+- `install.sh` pipes the key to `tlc configure` on stdin instead of a command-line argument.
+- Text from the server (agent labels, error messages) has terminal control characters removed before it is printed.
 
 ### Fixed
-- The spinner ticked every 100 *nanoseconds* (≈200k terminal writes per 350 ms); it now ticks at 10 Hz and also covers waits between turns and slow tools.
-- Edit failed on every multi-line match in CRLF files; CRLF is now preserved by Edit and Write.
-- Edit/Write overwrote files that changed on disk after being read; files are now written atomically, keeping mode and symlinks.
-- A stream cut off mid-answer counted as success; it is now an error. Requests the server rejected before doing work (429, 502, 503, refused connections) are retried with backoff; a silent stream is abandoned after 5 minutes (`TLC_STREAM_IDLE_TIMEOUT`).
-- A leading backtick at the start of a line did not open an inline code span.
-- Tool timings included the time spent waiting at a permission prompt.
-- Sessions started in the same second shared a transcript file.
-- Startup announced "agent switched" for the initial choice.
+- `tlc install cursor` / `cline` printed "no agents on the server yet" in the model steps even when there were agents.
+- `tlc configure` exited silently when the key prompt failed; it now says what is wrong, and refuses to wait for input when there is no terminal.
+- `/dev/null` is no longer mistaken for a terminal.
 
 ## [0.2.0] - 2026-10-22
 ### Added

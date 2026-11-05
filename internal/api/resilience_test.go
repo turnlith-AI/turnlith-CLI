@@ -6,23 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-const okStream = `data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}
-
-data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}
-
-data: [DONE]
-
-`
-
-func chatReq() ChatRequest {
-	return ChatRequest{Model: "m", Messages: []Message{UserMessage("hi")}}
-}
 
 func fastClient(url string) *Client {
 	c := New(url, "sk-test")
@@ -30,7 +17,7 @@ func fastClient(url string) *Client {
 	return c
 }
 
-func TestStreamChatRetriesRateLimitThenSucceeds(t *testing.T) {
+func TestDoRetriesRateLimitThenSucceeds(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) <= 2 {
@@ -38,27 +25,26 @@ func TestStreamChatRetriesRateLimitThenSucceeds(t *testing.T) {
 			fmt.Fprint(w, `{"error":{"message":"slow down","code":"rate_limited"}}`)
 			return
 		}
-		w.Header().Set("content-type", "text/event-stream")
-		fmt.Fprint(w, okStream)
+		fmt.Fprint(w, `{"agents":[{"codename":"sigma","model":"m:1"}]}`)
 	}))
 	defer srv.Close()
 
 	var retries []int
 	c := fastClient(srv.URL)
 	c.OnRetry = func(attempt int, wait time.Duration, err error) { retries = append(retries, attempt) }
-	turn, err := c.StreamChat(context.Background(), chatReq(), StreamHandlers{})
+	agents, err := c.ListAgents(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if turn.Text != "hi" || calls.Load() != 3 {
-		t.Fatalf("text=%q calls=%d", turn.Text, calls.Load())
+	if len(agents) != 1 || calls.Load() != 3 {
+		t.Fatalf("agents=%v calls=%d", agents, calls.Load())
 	}
 	if len(retries) != 2 || retries[0] != 1 || retries[1] != 2 {
 		t.Fatalf("OnRetry attempts = %v", retries)
 	}
 }
 
-func TestStreamChatGivesUpAfterRetries(t *testing.T) {
+func TestDoGivesUpAfterRetries(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -67,7 +53,7 @@ func TestStreamChatGivesUpAfterRetries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := fastClient(srv.URL).StreamChat(context.Background(), chatReq(), StreamHandlers{})
+	err := fastClient(srv.URL).Health(context.Background())
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != 503 {
 		t.Fatalf("err = %v", err)
@@ -77,15 +63,17 @@ func TestStreamChatGivesUpAfterRetries(t *testing.T) {
 	}
 }
 
-func TestStreamChatDoesNotRetryClientErrors(t *testing.T) {
-	for _, status := range []int{400, 401, 402, 403, 404, 504} {
+func TestDoDoesNotRetryClientErrors(t *testing.T) {
+	// 504 is deliberately absent from the retryable set: the upstream may
+	// already have started the work.
+	for _, status := range []int{400, 401, 402, 403, 404, 500, 504} {
 		var calls atomic.Int32
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			calls.Add(1)
 			w.WriteHeader(status)
 			fmt.Fprint(w, `{"error":{"message":"nope"}}`)
 		}))
-		_, err := fastClient(srv.URL).StreamChat(context.Background(), chatReq(), StreamHandlers{})
+		err := fastClient(srv.URL).Health(context.Background())
 		srv.Close()
 		if err == nil || calls.Load() != 1 {
 			t.Fatalf("status %d: err=%v calls=%d (must fail on the first attempt)", status, err, calls.Load())
@@ -93,7 +81,29 @@ func TestStreamChatDoesNotRetryClientErrors(t *testing.T) {
 	}
 }
 
-func TestStreamChatRetriesRefusedConnection(t *testing.T) {
+func TestDoRetriesAPostWithItsBodyIntact(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 512)
+		n, _ := r.Body.Read(buf)
+		bodies = append(bodies, string(buf[:n]))
+		if len(bodies) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		fmt.Fprint(w, `{"codename":"x","model":"m:1"}`)
+	}))
+	defer srv.Close()
+
+	if _, err := fastClient(srv.URL).CreateAgent(context.Background(), CreateAgentInput{Model: "m:1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 2 || bodies[0] == "" || bodies[0] != bodies[1] {
+		t.Fatalf("the retried request must resend the same body, got %q", bodies)
+	}
+}
+
+func TestDoRetriesRefusedConnection(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	url := srv.URL
 	srv.Close() // nothing listens any more: dial fails before any request is sent
@@ -101,7 +111,7 @@ func TestStreamChatRetriesRefusedConnection(t *testing.T) {
 	var retries atomic.Int32
 	c := fastClient(url)
 	c.OnRetry = func(int, time.Duration, error) { retries.Add(1) }
-	if _, err := c.StreamChat(context.Background(), chatReq(), StreamHandlers{}); err == nil {
+	if err := c.Health(context.Background()); err == nil {
 		t.Fatal("expected an error")
 	}
 	if retries.Load() != 3 {
@@ -109,7 +119,21 @@ func TestStreamChatRetriesRefusedConnection(t *testing.T) {
 	}
 }
 
-func TestStreamChatRetryRespectsContextCancel(t *testing.T) {
+func TestSetRetryDelaysWithNoArgumentsFailsFast(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "sk-test")
+	c.SetRetryDelays() // what `tlc doctor` does
+	if err := c.Health(context.Background()); err == nil || calls.Load() != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls.Load())
+	}
+}
+
+func TestDoRetryRespectsContextCancel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
@@ -120,7 +144,7 @@ func TestStreamChatRetryRespectsContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.OnRetry = func(int, time.Duration, error) { cancel() }
 	start := time.Now()
-	_, err := c.StreamChat(ctx, chatReq(), StreamHandlers{})
+	err := c.Health(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -145,89 +169,5 @@ func TestRetryDelayHonorsRetryAfter(t *testing.T) {
 	date := time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat)
 	if got := retryDelay(time.Second, date); got < 5*time.Second || got > 11*time.Second {
 		t.Fatalf("http-date = %v", got)
-	}
-}
-
-func TestStreamChatTruncatedStreamIsAnError(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("content-type", "text/event-stream")
-		// some text, then the connection just ends: no finish_reason, no [DONE]
-		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"par\"}}]}\n\n")
-	}))
-	defer srv.Close()
-
-	var got strings.Builder
-	_, err := fastClient(srv.URL).StreamChat(context.Background(), chatReq(), StreamHandlers{OnText: func(d string) { got.WriteString(d) }})
-	if !errors.Is(err, ErrTruncatedStream) {
-		t.Fatalf("err = %v, want ErrTruncatedStream", err)
-	}
-	if calls.Load() != 1 {
-		t.Fatalf("a stream that already produced output must not be retried (calls=%d)", calls.Load())
-	}
-	if got.String() != "par" {
-		t.Fatalf("partial text not delivered: %q", got.String())
-	}
-}
-
-func TestStreamChatDoneWithoutFinishReasonIsAccepted(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
-	}))
-	defer srv.Close()
-	turn, err := fastClient(srv.URL).StreamChat(context.Background(), chatReq(), StreamHandlers{})
-	if err != nil || turn.Text != "ok" {
-		t.Fatalf("turn=%+v err=%v", turn, err)
-	}
-}
-
-func TestStreamChatIdleStallIsDetected(t *testing.T) {
-	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"}}]}\n\n")
-		w.(http.Flusher).Flush()
-		select { // then go silent without closing
-		case <-release:
-		case <-r.Context().Done():
-		}
-	}))
-	defer srv.Close()
-	defer close(release)
-
-	c := fastClient(srv.URL)
-	c.SetStreamIdleTimeout(150 * time.Millisecond)
-	start := time.Now()
-	_, err := c.StreamChat(context.Background(), chatReq(), StreamHandlers{})
-	if !errors.Is(err, ErrStreamStalled) {
-		t.Fatalf("err = %v, want ErrStreamStalled", err)
-	}
-	if time.Since(start) > 5*time.Second {
-		t.Fatal("stall detection too slow")
-	}
-}
-
-func TestStreamChatUserCancelIsNotAStall(t *testing.T) {
-	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"}}]}\n\n")
-		w.(http.Flusher).Flush()
-		select {
-		case <-release:
-		case <-r.Context().Done():
-		}
-	}))
-	defer srv.Close()
-	defer close(release)
-
-	c := fastClient(srv.URL)
-	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(100*time.Millisecond, cancel)
-	_, err := c.StreamChat(ctx, chatReq(), StreamHandlers{})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }

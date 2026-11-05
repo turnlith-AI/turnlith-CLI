@@ -1,5 +1,5 @@
-// Package cli wires everything together: argument handling, the interactive
-// REPL, the print mode, and the auxiliary commands.
+// Package cli wires the tlc commands together: argument handling and the
+// setup commands (configure, agents, install, uninstall, doctor, completion).
 package cli
 
 import (
@@ -33,13 +33,14 @@ func Main(argv []string) int {
 	case "doctor":
 		return runDoctor(opts)
 	case "completion":
-		return runCompletion(opts.prompt)
+		return runCompletion(opts.shell)
 	case "install":
 		return runInstall(opts)
 	case "uninstall":
 		return runUninstall(opts)
 	}
 
+	// the remaining commands talk to the server as the saved connection
 	app, err := newApp(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tlc: %s\n", friendlyErr(err))
@@ -57,8 +58,6 @@ func Main(argv []string) int {
 	case "agents-create":
 		return app.cmdAgentsCreate()
 	}
-	if opts.print {
-		return app.runPrint()
-	}
-	return app.runInteractive()
+	fmt.Fprintf(os.Stderr, "tlc: unhandled command %q\n", opts.command)
+	return 2
 }

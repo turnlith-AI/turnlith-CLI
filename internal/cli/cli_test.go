@@ -10,11 +10,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/turnlith-AI/turnlith-CLI/internal/agent"
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
-	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
-	"github.com/turnlith-AI/turnlith-CLI/internal/ui"
+	"github.com/turnlith-AI/turnlith-CLI/internal/config"
 	"github.com/turnlith-AI/turnlith-CLI/internal/version"
 )
 
@@ -33,44 +32,24 @@ func testAgents() []api.Agent {
 
 // -------------------------------------------------------------- mock server
 
-type mcpCall struct {
-	Name string
-	Args map[string]any
-}
-
-// mockServer stands in for a turnlith server: /v1/models, /health, the
-// streamed chat facade, the stateless MCP endpoint, and agent management.
+// mockServer stands in for a turnlith server: /health, /v1/models and agent
+// creation.
 type mockServer struct {
 	*httptest.Server
 
 	agents    []api.Agent
 	providers []api.ProviderStatus
 	catalog   []api.CatalogModel
-	chatFn    func(turn int, body api.ChatRequest) []string
-	mcpText   string
-	// chatFail, when set, may answer a chat request with a plain HTTP error
-	// (non-zero status plus JSON body) instead of a stream.
-	chatFail func(turn int) (status int, body string)
-	// omitDone ends each stream without the terminating [DONE] frame, like a
-	// connection that was cut mid-turn.
-	omitDone bool
 
-	mu    sync.Mutex
-	turns int
+	mu sync.Mutex
 	// modelsHits counts GET /v1/models — `tlc install` lists the agents there.
 	modelsHits int
-	chats      []api.ChatRequest
-	methods    []string
-	mcpCalls   []mcpCall
-
-	nextID  int
-	creates []api.CreateAgentInput
-	patches []map[string]any
+	nextID     int
+	creates    []api.CreateAgentInput
 }
 
 // testProviders is the per-provider capability fixture: gemini and openai
-// expose reasoning levels (minimal sets come from the server's defs.ts),
-// groq has no reasoning control.
+// expose reasoning levels, groq has no reasoning control.
 func testProviders() []api.ProviderStatus {
 	return []api.ProviderStatus{
 		{Provider: "gemini", Available: true, Source: "env", ReasoningEfforts: []string{"minimal", "low", "medium", "high"}},
@@ -89,10 +68,9 @@ func testCatalog() []api.CatalogModel {
 	}
 }
 
-func newMockServer(t *testing.T, agents []api.Agent, chatFn func(turn int, body api.ChatRequest) []string) *mockServer {
+func newMockServer(t *testing.T, agents []api.Agent) *mockServer {
 	t.Helper()
-	m := &mockServer{agents: agents, chatFn: chatFn, providers: testProviders(), catalog: testCatalog()}
-
+	m := &mockServer{agents: agents, providers: testProviders(), catalog: testCatalog()}
 	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
@@ -114,44 +92,7 @@ func newMockServer(t *testing.T, agents []api.Agent, chatFn func(turn int, body 
 			})
 		case "/v1/agents":
 			m.handleAgentCreate(w, r)
-		case "/v1/chat/completions":
-			var body api.ChatRequest
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, `{"error":{"message":"bad request"}}`, http.StatusBadRequest)
-				return
-			}
-			m.mu.Lock()
-			turn := m.turns
-			m.turns++
-			m.chats = append(m.chats, body)
-			m.mu.Unlock()
-
-			if m.chatFail != nil {
-				if status, errBody := m.chatFail(turn); status != 0 {
-					w.Header().Set("content-type", "application/json")
-					w.WriteHeader(status)
-					_, _ = io.WriteString(w, errBody)
-					return
-				}
-			}
-			w.Header().Set("content-type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			flusher := w.(http.Flusher)
-			for _, payload := range m.chatFn(turn, body) {
-				_, _ = io.WriteString(w, "data: "+payload+"\n\n")
-				flusher.Flush()
-			}
-			if !m.omitDone {
-				_, _ = io.WriteString(w, "data: [DONE]\n\n")
-				flusher.Flush()
-			}
-		case "/v1/mcp":
-			m.handleMCP(w, r)
 		default:
-			if r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/agents/") {
-				m.handleAgentPatch(w, r)
-				return
-			}
 			http.NotFound(w, r)
 		}
 	}))
@@ -171,7 +112,7 @@ func (m *mockServer) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"bad request"}}`, http.StatusBadRequest)
 		return
 	}
-	agent := api.Agent{ID: "", Codename: input.Codename, Model: input.Model}
+	agent := api.Agent{Codename: input.Codename, Model: input.Model}
 	if input.Label != "" {
 		agent.Label = &input.Label
 	}
@@ -194,168 +135,21 @@ func (m *mockServer) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(agent)
 }
 
-// handleAgentPatch answers PATCH /v1/agents/:id with the same merge semantics
-// the server has: an explicit null effort clears it.
-func (m *mockServer) handleAgentPatch(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/v1/agents/")
-	var patch map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		http.Error(w, `{"error":{"message":"bad request"}}`, http.StatusBadRequest)
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.patches = append(m.patches, patch)
-	for i := range m.agents {
-		if m.agents[i].ID != id {
-			continue
-		}
-		if model, ok := patch["model"].(string); ok && model != "" {
-			m.agents[i].Model = model
-		}
-		if raw, ok := patch["reasoningEffort"]; ok {
-			if raw == nil {
-				m.agents[i].ReasoningEffort = nil
-			} else if level, ok := raw.(string); ok {
-				m.agents[i].ReasoningEffort = &level
-			}
-		}
-		updated := m.agents[i]
-		writeJSON(w, updated)
-		return
-	}
-	http.Error(w, `{"error":{"message":"agent not found","code":"model_not_found"}}`, http.StatusNotFound)
-}
-
-// createdAgents returns the POST /v1/agents bodies seen so far.
 func (m *mockServer) createdAgents() []api.CreateAgentInput {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]api.CreateAgentInput(nil), m.creates...)
 }
 
-// agentPatches returns the PATCH /v1/agents/:id bodies seen so far.
-func (m *mockServer) agentPatches() []map[string]any {
+func (m *mockServer) hits() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]map[string]any(nil), m.patches...)
-}
-
-func (m *mockServer) handleMCP(w http.ResponseWriter, r *http.Request) {
-	var rpc struct {
-		ID     int             `json:"id"`
-		Method string          `json:"method"`
-		Params json.RawMessage `json:"params"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&rpc); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	m.mu.Lock()
-	m.methods = append(m.methods, rpc.Method)
-	m.mu.Unlock()
-
-	if rpc.Method == "initialize" {
-		writeJSON(w, map[string]any{
-			"jsonrpc": "2.0", "id": rpc.ID,
-			"result": map[string]any{
-				"protocolVersion": "2025-06-18",
-				"capabilities":    map[string]any{},
-				"serverInfo":      map[string]any{"name": "turnlith-controller"},
-			},
-		})
-		return
-	}
-
-	var call struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
-	}
-	_ = json.Unmarshal(rpc.Params, &call)
-	m.mu.Lock()
-	m.mcpCalls = append(m.mcpCalls, mcpCall{Name: call.Name, Args: call.Arguments})
-	text := m.mcpText
-	m.mu.Unlock()
-
-	writeJSON(w, map[string]any{
-		"jsonrpc": "2.0", "id": rpc.ID,
-		"result": map[string]any{
-			"content": []map[string]any{{"type": "text", "text": text}},
-			"isError": false,
-		},
-	})
-}
-
-func (m *mockServer) requests() []api.ChatRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]api.ChatRequest(nil), m.chats...)
-}
-
-func (m *mockServer) mcpMethods() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]string(nil), m.methods...)
-}
-
-func (m *mockServer) toolsCalled() []mcpCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]mcpCall(nil), m.mcpCalls...)
+	return m.modelsHits
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("content-type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-// ---------------------------------------------------------------- SSE chunks
-
-func mustJSON(t *testing.T, v any) string {
-	t.Helper()
-	data, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
-}
-
-func textChunk(t *testing.T, text string) string {
-	return mustJSON(t, map[string]any{
-		"choices": []any{map[string]any{
-			"index": 0,
-			"delta": map[string]any{"content": text},
-		}},
-	})
-}
-
-func toolChunk(t *testing.T, id, name, args string) string {
-	return mustJSON(t, map[string]any{
-		"choices": []any{map[string]any{
-			"index": 0,
-			"delta": map[string]any{"tool_calls": []any{map[string]any{
-				"index":    0,
-				"id":       id,
-				"type":     "function",
-				"function": map[string]any{"name": name, "arguments": args},
-			}}},
-		}},
-	})
-}
-
-func finalChunk(t *testing.T, text string, promptTokens, completionTokens int) string {
-	return mustJSON(t, map[string]any{
-		"choices": []any{map[string]any{
-			"index":         0,
-			"delta":         map[string]any{"content": text},
-			"finish_reason": "stop",
-		}},
-		"usage": map[string]any{
-			"prompt_tokens":     promptTokens,
-			"completion_tokens": completionTokens,
-			"total_tokens":      promptTokens + completionTokens,
-		},
-	})
 }
 
 // -------------------------------------------------------------- run helpers
@@ -402,17 +196,52 @@ func readFile(t *testing.T, f *os.File) string {
 	return string(data)
 }
 
-// setupEnv makes the run hermetic: connection via environment, config,
-// preferences, and transcripts under temp dirs, no lingering agent choice.
-// HOME is redirected too, because macOS resolves ~/.config from it directly.
-func setupEnv(t *testing.T, baseURL string) {
+// withStdin makes the next run read content from a pipe, the way
+// `echo $KEY | tlc configure --api-key-stdin` does.
+func withStdin(t *testing.T, content string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old; r.Close() })
+}
+
+// isolate points HOME and the config/data directories at fresh temp dirs and
+// clears the connection variables. HOME is redirected too, because macOS
+// resolves ~/.config from it directly.
+func isolate(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("TLITH_BASE_URL", baseURL)
-	t.Setenv("TLITH_API_KEY", "sk-test-key")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("TLC_AGENT", "")
+	t.Setenv("TLITH_BASE_URL", "")
+	t.Setenv("TLITH_API_KEY", "")
+	t.Setenv("TLC_ALLOW_INSECURE", "")
+}
+
+// setupEnv makes the run hermetic with the connection given via environment.
+func setupEnv(t *testing.T, baseURL string) {
+	t.Helper()
+	isolate(t)
+	t.Setenv("TLITH_BASE_URL", baseURL)
+	t.Setenv("TLITH_API_KEY", "sk-test-key")
+}
+
+// fastRetries sets the API retry schedule for the duration of the test; with
+// no arguments it disables retries (a non-nil empty slice, since nil means
+// "use the defaults").
+func fastRetries(t *testing.T, delays ...time.Duration) {
+	t.Helper()
+	old := clientRetryDelays
+	clientRetryDelays = append([]time.Duration{}, delays...)
+	t.Cleanup(func() { clientRetryDelays = old })
 }
 
 func mustContain(t *testing.T, name, got, want string) {
@@ -422,25 +251,41 @@ func mustContain(t *testing.T, name, got, want string) {
 	}
 }
 
-func lastMessage(t *testing.T, req api.ChatRequest) api.Message {
+func mustNotContain(t *testing.T, name, got, bad string) {
 	t.Helper()
-	if len(req.Messages) == 0 {
-		t.Fatal("request carried no messages")
+	if strings.Contains(got, bad) {
+		t.Fatalf("%s must not contain %q\n--- got ---\n%s", name, bad, got)
 	}
-	return req.Messages[len(req.Messages)-1]
 }
 
 // ------------------------------------------------------------------ the tests
 
 func TestHelpAndVersion(t *testing.T) {
-	res := runTLC(t, t.TempDir(), "version")
-	if res.code != 0 || strings.TrimSpace(res.stdout) != version.Version {
-		t.Fatalf("version: code=%d stdout=%q", res.code, res.stdout)
+	for _, arg := range []string{"version", "-v", "--version"} {
+		res := runTLC(t, t.TempDir(), arg)
+		if res.code != 0 || strings.TrimSpace(res.stdout) != version.Version {
+			t.Fatalf("%s: code=%d stdout=%q", arg, res.code, res.stdout)
+		}
 	}
+	for _, arg := range []string{"help", "-h", "--help"} {
+		res := runTLC(t, t.TempDir(), arg)
+		if res.code != 0 || !strings.Contains(res.stdout, "Usage:") || res.stderr != "" {
+			t.Fatalf("%s: code=%d stdout=%q stderr=%q", arg, res.code, res.stdout, res.stderr)
+		}
+	}
+}
 
-	res = runTLC(t, t.TempDir(), "help")
-	if res.code != 0 || !strings.Contains(res.stdout, "Usage:") {
-		t.Fatalf("help: code=%d stdout=%q", res.code, res.stdout)
+func TestNoArgumentsShowsHelp(t *testing.T) {
+	srv := newMockServer(t, testAgents())
+	setupEnv(t, srv.URL)
+	res := runTLC(t, t.TempDir())
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stdout", res.stdout, "Usage:")
+	mustContain(t, "stdout", res.stdout, "tlc install")
+	if srv.hits() != 0 {
+		t.Fatal("showing help must not contact the server")
 	}
 }
 
@@ -452,18 +297,70 @@ func TestUnknownFlagExits2(t *testing.T) {
 	mustContain(t, "stderr", res.stderr, "unknown flag")
 }
 
-func TestNotConfigured(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("TLITH_BASE_URL", "")
-	t.Setenv("TLITH_API_KEY", "")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+func TestUnknownCommandIsAUsageError(t *testing.T) {
+	srv := newMockServer(t, testAgents())
+	setupEnv(t, srv.URL)
 
-	res := runTLC(t, t.TempDir(), "-p", "hi")
+	// a typo gets a suggestion
+	res := runTLC(t, t.TempDir(), "agnts")
+	if res.code != 2 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, `unknown command "agnts"`)
+	mustContain(t, "stderr", res.stderr, "did you mean `tlc agents`?")
+
+	// an old-style prompt is no longer sent to a model — and says so
+	res = runTLC(t, t.TempDir(), "fix the failing test")
+	if res.code != 2 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, "no longer includes a coding agent")
+
+	if srv.hits() != 0 {
+		t.Fatal("a usage error must not contact the server")
+	}
+}
+
+func TestRemovedFlagsExplainThemselves(t *testing.T) {
+	for _, argv := range [][]string{
+		{"-p", "hello"}, {"--print"}, {"-c"}, {"--continue"}, {"--yolo"}, {"--verbose"},
+		{"--agent", "sigma"}, {"--permission-mode=auto"}, {"--allowed-tools", "Bash"},
+		{"--disallowed-tools=Write"}, {"--max-turns", "3"}, {"--output-format", "json"},
+		{"agents", "-p"},
+	} {
+		res := runTLC(t, t.TempDir(), argv...)
+		if res.code != 2 {
+			t.Errorf("%v: code=%d, want 2", argv, res.code)
+			continue
+		}
+		if !strings.Contains(res.stderr, "was removed") || !strings.Contains(res.stderr, "no longer includes a coding agent") {
+			t.Errorf("%v: stderr = %q", argv, res.stderr)
+		}
+		if res.stdout != "" {
+			t.Errorf("%v: stdout = %q", argv, res.stdout)
+		}
+	}
+}
+
+func TestFlagsWithoutACommand(t *testing.T) {
+	res := runTLC(t, t.TempDir(), "--base-url", "https://turnlith.com")
+	if res.code != 2 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, "missing command")
+}
+
+func TestNotConfigured(t *testing.T) {
+	isolate(t)
+	res := runTLC(t, t.TempDir(), "agents")
 	if res.code != 1 {
 		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
 	}
 	mustContain(t, "stderr", res.stderr, "not connected to a turnlith server")
+	mustContain(t, "stderr", res.stderr, "tlc configure")
+	if res.stdout != "" {
+		t.Fatalf("errors belong on stderr, stdout = %q", res.stdout)
+	}
 }
 
 func TestAuthFailureIsFriendly(t *testing.T) {
@@ -474,257 +371,96 @@ func TestAuthFailureIsFriendly(t *testing.T) {
 	t.Cleanup(srv.Close)
 	setupEnv(t, srv.URL)
 
-	res := runTLC(t, t.TempDir(), "-p", "hi")
+	res := runTLC(t, t.TempDir(), "agents")
 	if res.code != 1 {
 		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
 	}
 	mustContain(t, "stderr", res.stderr, "authentication failed")
+	mustContain(t, "stderr", res.stderr, "tlc configure")
 }
 
-func TestPrintModeStreamsAssistantText(t *testing.T) {
-	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
-		return []string{
-			textChunk(t, "Looking at "),
-			textChunk(t, "the project."),
-			finalChunk(t, " All good.", 1234, 12),
-		}
-	})
-	setupEnv(t, srv.URL)
+func TestUnreachableServerIsFriendly(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	setupEnv(t, url)
+	fastRetries(t) // no retries: fail at once
 
-	res := runTLC(t, t.TempDir(), "-p", "hi there")
-	if res.code != 0 {
-		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
-	}
-	mustContain(t, "stdout", res.stdout, "Looking at the project. All good.")
-
-	reqs := srv.requests()
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 chat request, got %d", len(reqs))
-	}
-	req := reqs[0]
-	if req.Model != "sigma" {
-		t.Errorf("model = %q, want sigma", req.Model)
-	}
-	if !req.Stream {
-		t.Error("stream flag not set")
-	}
-	if got := lastMessage(t, req); got.Role != "user" || got.Content != "hi there" {
-		t.Errorf("last message = %+v", got)
-	}
-	if len(req.Messages) == 0 || req.Messages[0].Role != "system" || req.Messages[0].Content == "" {
-		t.Errorf("first message should be a non-empty system prompt: %+v", req.Messages[0])
-	}
-	names := map[string]bool{}
-	for _, def := range req.Tools {
-		names[def.Function.Name] = true
-	}
-	for _, want := range []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "SearchMemory", "TodoWrite"} {
-		if !names[want] {
-			t.Errorf("tool %s not offered to the model", want)
-		}
-	}
-}
-
-func TestMultiAgentRequiresChoice(t *testing.T) {
-	agents := testAgents()
-	agents = append(agents, api.Agent{ID: "agent-2", Codename: "lil-coder", Label: nil, Model: "gemini:gemini-3.8-flash"})
-	srv := newMockServer(t, agents, func(turn int, body api.ChatRequest) []string {
-		return []string{finalChunk(t, "hello", 10, 2)}
-	})
-	setupEnv(t, srv.URL)
-
-	dir := t.TempDir()
-	res := runTLC(t, dir, "-p", "hi")
+	res := runTLC(t, t.TempDir(), "agents")
 	if res.code != 1 {
 		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
 	}
-	mustContain(t, "stderr", res.stderr, "choose one with --agent")
-	if strings.Contains(res.stdout, "choose one") {
-		t.Fatalf("error text leaked into stdout: %q", res.stdout)
-	}
+	mustContain(t, "stderr", res.stderr, "cannot reach")
+}
 
-	res = runTLC(t, dir, "-p", "--agent", "lil-coder", "hi")
+func TestRetriesAreAnnouncedOnStderr(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, map[string]any{"agents": testAgents()})
+	}))
+	t.Cleanup(srv.Close)
+	setupEnv(t, srv.URL)
+	fastRetries(t, time.Millisecond)
+
+	res := runTLC(t, t.TempDir(), "agents")
 	if res.code != 0 {
 		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
 	}
-	reqs := srv.requests()
-	if len(reqs) != 1 || reqs[0].Model != "lil-coder" {
-		t.Fatalf("requests = %+v", reqs)
-	}
+	mustContain(t, "stderr", res.stderr, "server unavailable — retrying")
+	mustNotContain(t, "stdout", res.stdout, "retrying") // stdout stays data
+	mustContain(t, "stdout", res.stdout, "sigma")
 }
 
 func TestAgentsCommandListsWorkspace(t *testing.T) {
 	agents := testAgents()
-	agents = append(agents, api.Agent{ID: "agent-2", Codename: "lil-coder", Label: strPtr("Lil Coder"), Model: "gemini:gemini-3.8-flash"})
-	srv := newMockServer(t, agents, func(turn int, body api.ChatRequest) []string { return nil })
+	agents = append(agents, api.Agent{ID: "agent-2", Codename: "lil-coder", Label: strPtr("Lil Coder"), Model: "gemini:gemini-3.8-flash", ReasoningEffort: strPtr("high")})
+	srv := newMockServer(t, agents)
+	setupEnv(t, srv.URL)
+
+	for _, argv := range [][]string{{"agents"}, {"agents", "list"}} {
+		res := runTLC(t, t.TempDir(), argv...)
+		if res.code != 0 {
+			t.Fatalf("%v: code=%d stderr=%q", argv, res.code, res.stderr)
+		}
+		mustContain(t, "stdout", res.stdout, "CODENAME")
+		mustContain(t, "stdout", res.stdout, "sigma")
+		mustContain(t, "stdout", res.stdout, "Lil Coder")
+		mustContain(t, "stdout", res.stdout, "gemini:gemini-3.8-flash · effort high")
+	}
+}
+
+func TestAgentsCommandNeverPrintsServerControlCharacters(t *testing.T) {
+	hostile := api.Agent{ID: "a", Codename: "evil", Label: strPtr("pwn\x1b]0;owned\x07\x1b[2J ed"), Model: "gemini:x\x1b[31m"}
+	srv := newMockServer(t, []api.Agent{hostile})
 	setupEnv(t, srv.URL)
 
 	res := runTLC(t, t.TempDir(), "agents")
 	if res.code != 0 {
 		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
 	}
-	mustContain(t, "stdout", res.stdout, "CODENAME")
-	mustContain(t, "stdout", res.stdout, "sigma")
-	mustContain(t, "stdout", res.stdout, "Lil Coder")
-	mustContain(t, "stdout", res.stdout, "gemini:gemini-3.8-flash")
+	if strings.ContainsRune(res.stdout, 0x1b) || strings.ContainsRune(res.stdout, 0x07) {
+		t.Fatalf("terminal control characters from the server reached the screen: %q", res.stdout)
+	}
+	mustContain(t, "stdout", res.stdout, "evil")
 }
 
-func TestPrintModeReadToolRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(dir+"/notes.txt", []byte("the-secret-marker\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
-		if turn == 0 {
-			return []string{toolChunk(t, "call_1", "Read", `{"file_path":"notes.txt"}`)}
-		}
-		return []string{finalChunk(t, "It says: the-secret-marker.", 900, 20)}
-	})
+func TestAgentsCommandWithAnEmptyWorkspacePointsToCreate(t *testing.T) {
+	srv := newMockServer(t, nil)
 	setupEnv(t, srv.URL)
-
-	res := runTLC(t, dir, "-p", "what is in notes.txt?")
-	if res.code != 0 {
-		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	res := runTLC(t, t.TempDir(), "agents")
+	if res.code != 1 {
+		t.Fatalf("code=%d", res.code)
 	}
-	mustContain(t, "stderr", res.stderr, "⏺ Read")
-	mustContain(t, "stdout", res.stdout, "It says: the-secret-marker.")
-	if strings.Contains(res.stdout, "⏺") {
-		t.Fatalf("tool block leaked into stdout: %q", res.stdout)
-	}
-
-	reqs := srv.requests()
-	if len(reqs) != 2 {
-		t.Fatalf("expected 2 chat requests (tool round trip), got %d", len(reqs))
-	}
-	replay := reqs[1].Messages
-	if len(replay) != 4 {
-		t.Fatalf("replayed history = %d messages, want 4: %+v", len(replay), replay)
-	}
-	if a := replay[2]; a.Role != "assistant" || len(a.ToolCalls) != 1 || a.ToolCalls[0].Function.Name != "Read" {
-		t.Errorf("assistant tool-call round not replayed: %+v", a)
-	}
-	if tr := replay[3]; tr.Role != "tool" || tr.ToolCallID != "call_1" {
-		t.Errorf("tool result round not replayed: %+v", tr)
-	} else {
-		mustContain(t, "tool result", tr.Content.(string), "the-secret-marker")
-	}
-}
-
-func TestPrintModeDeniesGatedTool(t *testing.T) {
-	dir := t.TempDir()
-	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
-		if turn == 0 {
-			return []string{toolChunk(t, "call_b", "Bash", `{"command":"echo ran > pwned.txt"}`)}
-		}
-		return []string{finalChunk(t, "Okay, I will not run that.", 500, 10)}
-	})
-	setupEnv(t, srv.URL)
-
-	res := runTLC(t, dir, "-p", "run a command")
-	if res.code != 0 {
-		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
-	}
-	if _, err := os.Stat(dir + "/pwned.txt"); err == nil {
-		t.Fatal("denied Bash command was executed")
-	}
-	mustContain(t, "stderr", res.stderr, "denied")
-	mustContain(t, "stdout", res.stdout, "Okay, I will not run that.")
-
-	reqs := srv.requests()
-	if len(reqs) != 2 {
-		t.Fatalf("expected 2 chat requests, got %d", len(reqs))
-	}
-	tool := lastMessage(t, reqs[1])
-	mustContain(t, "denial result", tool.Content.(string), "denied permission")
-}
-
-func TestPrintModeYoloRunsGatedTool(t *testing.T) {
-	dir := t.TempDir()
-	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
-		if turn == 0 {
-			return []string{toolChunk(t, "call_b", "Bash", `{"command":"echo hi > ran.txt"}`)}
-		}
-		return []string{finalChunk(t, "Done.", 500, 10)}
-	})
-	setupEnv(t, srv.URL)
-
-	res := runTLC(t, dir, "-p", "run a command", "--yolo")
-	if res.code != 0 {
-		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
-	}
-	data, err := os.ReadFile(dir + "/ran.txt")
-	if err != nil {
-		t.Fatalf("yolo Bash did not run: %v", err)
-	}
-	if strings.TrimSpace(string(data)) != "hi" {
-		t.Fatalf("ran.txt = %q", data)
-	}
-	if strings.Contains(res.stderr, "denied") {
-		t.Fatalf("tool was denied despite --yolo: %q", res.stderr)
-	}
-}
-
-func TestSearchMemoryToolUsesMCP(t *testing.T) {
-	srv := newMockServer(t, testAgents(), func(turn int, body api.ChatRequest) []string {
-		if turn == 0 {
-			return []string{toolChunk(t, "call_m", "SearchMemory", `{"query":"deploy steps","scope":"memory"}`)}
-		}
-		return []string{finalChunk(t, "From memory: make release.", 700, 15)}
-	})
-	srv.mcpText = "Deploy: run make release from main."
-	setupEnv(t, srv.URL)
-
-	res := runTLC(t, t.TempDir(), "-p", "how do we deploy?")
-	if res.code != 0 {
-		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
-	}
-	mustContain(t, "stdout", res.stdout, "From memory: make release.")
-
-	methods := srv.mcpMethods()
-	if len(methods) < 2 || methods[0] != "initialize" || methods[1] != "tools/call" {
-		t.Fatalf("MCP methods = %v, want initialize then tools/call", methods)
-	}
-	calls := srv.toolsCalled()
-	if len(calls) != 1 {
-		t.Fatalf("MCP tools/call count = %d", len(calls))
-	}
-	if calls[0].Name != "search_memory" {
-		t.Errorf("MCP tool name = %q", calls[0].Name)
-	}
-	if got := calls[0].Args["agent"]; got != "sigma" {
-		t.Errorf("search_memory agent = %v, want sigma", got)
-	}
-	if got := calls[0].Args["scope"]; got != "memory" {
-		t.Errorf("search_memory scope = %v, want memory", got)
-	}
-
-	reqs := srv.requests()
-	if len(reqs) != 2 {
-		t.Fatalf("expected 2 chat requests, got %d", len(reqs))
-	}
-	tool := lastMessage(t, reqs[1])
-	mustContain(t, "memory result", tool.Content.(string), "[agent sigma]")
-	mustContain(t, "memory result", tool.Content.(string), "make release")
-}
-
-// --------------------------------------------------------- agent management
-
-// testApp wires the fields the management handlers touch, with output captured
-// in a buffer instead of a terminal.
-func testApp(t *testing.T, baseURL string, agents []api.Agent) (*app, *strings.Builder) {
-	t.Helper()
-	out := &strings.Builder{}
-	theme := &ui.Theme{}
-	a := &app{
-		client:   api.New(baseURL, "sk-test-key"),
-		agents:   agents,
-		agent:    agents[0],
-		theme:    theme,
-		renderer: ui.NewRenderer(out, theme),
-		runner:   &agent.Runner{},
-	}
-	a.policy = &permissions.Policy{}
-	return a, out
+	mustContain(t, "stderr", res.stderr, "tlc agents create")
 }
 
 func TestParseAgentsCreateSubcommands(t *testing.T) {
@@ -753,12 +489,12 @@ func TestParseAgentsCreateSubcommands(t *testing.T) {
 		t.Fatal("unknown subcommand was accepted")
 	}
 	if _, err := parseArgs([]string{"agents", "create", "make", "it", "good"}); err == nil {
-		t.Fatal("positional prompt was accepted by agents create")
+		t.Fatal("a stray word was accepted by agents create")
 	}
 }
 
 func TestAgentsCreatePostsFlags(t *testing.T) {
-	srv := newMockServer(t, testAgents(), nil)
+	srv := newMockServer(t, testAgents())
 	setupEnv(t, srv.URL)
 
 	res := runTLC(t, t.TempDir(), "agents", "create",
@@ -769,7 +505,7 @@ func TestAgentsCreatePostsFlags(t *testing.T) {
 	}
 	mustContain(t, "stdout", res.stdout, "created agent tlc-test")
 	mustContain(t, "stdout", res.stdout, "openai:gpt-6-sol · effort high")
-	mustContain(t, "stdout", res.stdout, "tlc --agent tlc-test")
+	mustContain(t, "stdout", res.stdout, "tlc install")
 
 	created := srv.createdAgents()
 	if len(created) != 1 {
@@ -782,7 +518,7 @@ func TestAgentsCreatePostsFlags(t *testing.T) {
 }
 
 func TestAgentsCreateGeneratesCodename(t *testing.T) {
-	srv := newMockServer(t, testAgents(), nil)
+	srv := newMockServer(t, testAgents())
 	setupEnv(t, srv.URL)
 
 	res := runTLC(t, t.TempDir(), "agents", "create", "--model", "gemini:gemini-3.8-flash")
@@ -795,39 +531,56 @@ func TestAgentsCreateGeneratesCodename(t *testing.T) {
 	}
 }
 
+func TestAgentsCreateAcceptsDefaultEffortSpelling(t *testing.T) {
+	srv := newMockServer(t, testAgents())
+	setupEnv(t, srv.URL)
+	res := runTLC(t, t.TempDir(), "agents", "create", "--model", "groq:llama-4-scout", "--effort", "default")
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	if created := srv.createdAgents(); len(created) != 1 || created[0].ReasoningEffort != "" {
+		t.Fatalf("create bodies = %+v", created)
+	}
+}
+
 func TestAgentsCreateNeedsModelOffTTY(t *testing.T) {
-	srv := newMockServer(t, testAgents(), nil)
+	srv := newMockServer(t, testAgents())
 	setupEnv(t, srv.URL)
 
 	res := runTLC(t, t.TempDir(), "agents", "create")
 	if res.code != 1 {
 		t.Fatalf("code=%d stdout=%q", res.code, res.stdout)
 	}
-	mustContain(t, "stdout", res.stdout, "--model is required")
+	mustContain(t, "stderr", res.stderr, "--model is required")
 	if len(srv.createdAgents()) != 0 {
 		t.Fatal("a create was attempted without a model")
 	}
 }
 
-func TestAgentsCreateRejectsBadCodenameAndEffort(t *testing.T) {
-	srv := newMockServer(t, testAgents(), nil)
+func TestAgentsCreateRejectsBadInputBeforeThePost(t *testing.T) {
+	srv := newMockServer(t, testAgents())
 	setupEnv(t, srv.URL)
 
-	res := runTLC(t, t.TempDir(), "agents", "create", "--name", "Not-Allowed", "--model", "gemini:gemini-3.8-flash")
-	if res.code != 1 {
-		t.Fatalf("code=%d", res.code)
+	for name, tc := range map[string]struct {
+		argv []string
+		want string
+	}{
+		"bad codename": {[]string{"--name", "Not-Allowed", "--model", "gemini:gemini-3.8-flash"}, "not usable"},
+		// groq has no reasoning control: asking for a level must fail with the provider named
+		"effort on a knobless provider": {[]string{"--model", "groq:llama-4-scout", "--effort", "high"}, "no reasoning control"},
+		"effort the provider rejects":   {[]string{"--model", "gemini:gemini-3.8-flash", "--effort", "xhigh"}, "supported: minimal, low, medium, high"},
+		"unavailable model":             {[]string{"--model", "openai:gpt-6-luna"}, "not available in this workspace"},
+	} {
+		res := runTLC(t, t.TempDir(), append([]string{"agents", "create"}, tc.argv...)...)
+		if res.code != 1 {
+			t.Errorf("%s: code=%d", name, res.code)
+		}
+		if !strings.Contains(res.stderr, tc.want) {
+			t.Errorf("%s: stderr = %q, want %q", name, res.stderr, tc.want)
+		}
 	}
-	mustContain(t, "stdout", res.stdout, "not usable")
-
-	// groq has no reasoning control: asking for a level must fail before the
-	// POST, with the provider named.
-	res = runTLC(t, t.TempDir(), "agents", "create", "--model", "groq:llama-4-scout", "--effort", "high")
-	if res.code != 1 {
-		t.Fatalf("code=%d", res.code)
-	}
-	mustContain(t, "stdout", res.stdout, "no reasoning control")
 	if len(srv.createdAgents()) != 0 {
-		t.Fatal("invalid effort still reached the server")
+		t.Fatal("invalid input still reached the server")
 	}
 }
 
@@ -847,227 +600,165 @@ func TestAgentsCreateExplainsAgentRoleKey(t *testing.T) {
 	if res.code != 1 {
 		t.Fatalf("code=%d", res.code)
 	}
-	mustContain(t, "stdout", res.stdout, "admin-role key")
+	mustContain(t, "stderr", res.stderr, "admin-role key")
 }
 
-func TestModelCommandPatchesAgentAndEffort(t *testing.T) {
-	srv := newMockServer(t, testAgents(), nil)
-	a, out := testApp(t, srv.URL, testAgents())
+// ---------------------------------------------------------------- configure
 
-	if err := a.handleModel([]string{"/model", "openai:gpt-6-sol", "high"}); err != nil {
-		t.Fatal(err)
+func savedConnection(t *testing.T) config.Connection {
+	t.Helper()
+	conn, err := config.LoadConnection()
+	if err != nil {
+		t.Fatalf("no saved connection: %v", err)
 	}
-	mustContain(t, "output", out.String(), "openai:gpt-6-sol · effort high")
-	if a.agent.Model != "openai:gpt-6-sol" || currentEffort(a.agent) != "high" {
-		t.Fatalf("local agent = %+v", a.agent)
-	}
-	patches := srv.agentPatches()
-	if len(patches) != 1 {
-		t.Fatalf("patches = %+v", patches)
-	}
-	if patches[0]["model"] != "openai:gpt-6-sol" || patches[0]["reasoningEffort"] != "high" {
-		t.Fatalf("patch body = %+v", patches[0])
-	}
+	return conn
 }
 
-func TestModelCommandClearsUnsupportedEffort(t *testing.T) {
-	agents := testAgents()
-	effort := "high"
-	agents[0].ReasoningEffort = &effort
-	srv := newMockServer(t, agents, nil)
-	a, out := testApp(t, srv.URL, agents)
+func TestConfigureVerifiesThenSavesFromStdin(t *testing.T) {
+	srv := newMockServer(t, testAgents())
+	isolate(t)
+	withStdin(t, "sk-from-stdin\n")
 
-	// groq:llama-4-scout is reachable but has no reasoning knob: the stored
-	// level must be dropped, not carried over.
-	if err := a.handleModel([]string{"/model", "groq:llama-4-scout"}); err != nil {
-		t.Fatal(err)
+	res := runTLC(t, t.TempDir(), "configure", "--base-url", srv.URL, "--api-key-stdin")
+	if res.code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", res.code, res.stdout, res.stderr)
 	}
-	mustContain(t, "output", out.String(), "provider default")
-	if currentEffort(a.agent) != "" {
-		t.Fatalf("effort survived the switch: %+v", a.agent.ReasoningEffort)
+	mustContain(t, "stdout", res.stdout, "connected to "+srv.URL)
+	mustContain(t, "stdout", res.stdout, "1 agent(s) available")
+	mustContain(t, "stdout", res.stdout, "tlc install")
+	mustNotContain(t, "output", res.stdout+res.stderr, "sk-from-stdin")
+
+	if conn := savedConnection(t); conn.BaseURL != srv.URL || conn.APIKey != "sk-from-stdin" {
+		t.Fatalf("saved = %+v", conn)
 	}
-	patches := srv.agentPatches()
-	if len(patches) != 1 {
-		t.Fatalf("patches = %+v", patches)
-	}
-	raw, present := patches[0]["reasoningEffort"]
-	if !present || raw != nil {
-		t.Fatalf("patch should send an explicit null effort: %+v", patches[0])
+	if info, err := os.Stat(config.ConnectionPath()); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("config file: %v %v", info, err)
 	}
 }
 
-func TestModelCommandKeepsSupportedEffort(t *testing.T) {
-	agents := testAgents()
-	effort := "low"
-	agents[0].ReasoningEffort = &effort
-	srv := newMockServer(t, agents, nil)
-	a, _ := testApp(t, srv.URL, agents)
+func TestConfigureSendsTheKeyItWasGiven(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			gotAuth = r.Header.Get("authorization")
+			writeJSON(w, map[string]any{"agents": []any{}})
+			return
+		}
+		writeJSON(w, map[string]any{"status": "ok"})
+	}))
+	t.Cleanup(srv.Close)
+	isolate(t)
 
-	// gemini → openai keeps a level both providers accept.
-	if err := a.handleModel([]string{"/model", "openai:gpt-6-sol"}); err != nil {
-		t.Fatal(err)
+	res := runTLC(t, t.TempDir(), "configure", "--base-url", srv.URL, "--api-key", "sk-flag")
+	if res.code != 0 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
 	}
-	patches := srv.agentPatches()
-	if len(patches) != 1 || patches[0]["reasoningEffort"] != "low" {
-		t.Fatalf("patches = %+v", patches)
+	if gotAuth != "Bearer sk-flag" {
+		t.Fatalf("auth = %q", gotAuth)
+	}
+	mustContain(t, "stderr", res.stderr, "--api-key is visible")
+	mustContain(t, "stdout", res.stdout, "no agents exist in this workspace yet")
+}
+
+func TestConfigureDoesNotSaveARejectedKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			writeJSON(w, map[string]any{"status": "ok"})
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"Invalid API key"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	isolate(t)
+	withStdin(t, "sk-wrong\n")
+
+	res := runTLC(t, t.TempDir(), "configure", "--base-url", srv.URL, "--api-key-stdin")
+	if res.code != 1 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, "key check failed")
+	if _, err := os.Stat(config.ConnectionPath()); err == nil {
+		t.Fatal("a rejected key was saved")
 	}
 }
 
-func TestModelCommandRejectsUnavailableModel(t *testing.T) {
-	srv := newMockServer(t, testAgents(), nil)
-	a, _ := testApp(t, srv.URL, testAgents())
+func TestConfigureDoesNotSaveWhenTheServerIsDown(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	isolate(t)
+	fastRetries(t)
+	withStdin(t, "sk-x\n")
 
-	err := a.handleModel([]string{"/model", "openai:gpt-6-luna"})
-	if err == nil {
-		t.Fatal("an unavailable model was accepted")
+	res := runTLC(t, t.TempDir(), "configure", "--base-url", url, "--api-key-stdin")
+	if res.code != 1 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
 	}
-	mustContain(t, "error", err.Error(), "not available")
-	if len(srv.agentPatches()) != 0 {
-		t.Fatal("a patch was sent for an unavailable model")
+	mustContain(t, "stderr", res.stderr, "health check failed")
+	if _, err := os.Stat(config.ConnectionPath()); err == nil {
+		t.Fatal("a connection that was never verified was saved")
 	}
 }
 
-func TestEffortCommandSetsAndClears(t *testing.T) {
-	srv := newMockServer(t, testAgents(), nil)
-	a, _ := testApp(t, srv.URL, testAgents())
-
-	if err := a.handleEffort([]string{"/effort", "medium"}); err != nil {
-		t.Fatal(err)
+func TestConfigureRefusesPlainHTTPToARemoteHost(t *testing.T) {
+	isolate(t)
+	withStdin(t, "sk-x\n")
+	res := runTLC(t, t.TempDir(), "configure", "--base-url", "http://turnlith.example.com", "--api-key-stdin")
+	if res.code != 2 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
 	}
-	if currentEffort(a.agent) != "medium" || a.agent.Model != "gemini:gemini-3.8-flash" {
-		t.Fatalf("agent = %+v", a.agent)
-	}
-
-	if err := a.handleEffort([]string{"/effort", "default"}); err != nil {
-		t.Fatal(err)
-	}
-	if currentEffort(a.agent) != "" {
-		t.Fatalf("default did not clear the level: %+v", a.agent)
-	}
-
-	err := a.handleEffort([]string{"/effort", "xhigh"})
-	if err == nil {
-		t.Fatal("gemini accepted xhigh")
-	}
-	mustContain(t, "error", err.Error(), "supported: minimal, low, medium, high")
-
-	patches := srv.agentPatches()
-	if len(patches) != 2 {
-		t.Fatalf("patches = %+v", patches)
-	}
-	if raw, present := patches[1]["reasoningEffort"]; !present || raw != nil {
-		t.Fatalf("clearing should send an explicit null: %+v", patches[1])
+	mustContain(t, "stderr", res.stderr, "plain http")
+	if _, err := os.Stat(config.ConnectionPath()); err == nil {
+		t.Fatal("an unsafe URL was saved")
 	}
 }
 
-func TestEffortPickerDefaultIsExplicit(t *testing.T) {
-	// the picker's "provider default" entry returns "" — it must be read as an
-	// explicit reset, never as "no argument given" (which keeps the level)
-	if got := pickEffortArg(""); got != "default" {
-		t.Fatalf("picker default = %q, want %q", got, "default")
+func TestConfigureNeedsInputWhenThereIsNoTerminal(t *testing.T) {
+	isolate(t)
+	// no key and nobody to ask: say so instead of failing silently
+	res := runTLC(t, t.TempDir(), "configure", "--base-url", "https://turnlith.com")
+	if res.code != 2 {
+		t.Fatalf("code=%d stderr=%q", res.code, res.stderr)
 	}
-	if got := pickEffortArg("high"); got != "high" {
-		t.Fatalf("picker level = %q, want %q", got, "high")
+	mustContain(t, "stderr", res.stderr, "--api-key-stdin")
+
+	withStdin(t, "\n")
+	res = runTLC(t, t.TempDir(), "configure", "--base-url", "https://turnlith.com", "--api-key-stdin")
+	if res.code != 2 {
+		t.Fatalf("empty stdin: code=%d stderr=%q", res.code, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, "stdin was empty")
+}
+
+// ----------------------------------------------------------------- install
+
+func TestInstallRefusesPlainHTTPToARemoteHost(t *testing.T) {
+	srv := newMockServer(t, testAgents())
+	setupEnv(t, srv.URL)
+	t.Setenv("PATH", t.TempDir())
+	home := os.Getenv("HOME")
+
+	// the saved connection is fine, but --base-url must be held to the same rule
+	res := runTLC(t, t.TempDir(), "install", "cursor", "--base-url", "http://turnlith.example.com")
+	if res.code != 1 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", res.code, res.stdout, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, "plain http")
+	if exists(home + "/.cursor/mcp.json") {
+		t.Fatal("the api key was written for an unsafe server URL")
 	}
 }
 
-func TestEffortCommandRefusesKnoblessProvider(t *testing.T) {
-	agents := testAgents()
-	agents[0].Model = "groq:llama-4-scout"
-	srv := newMockServer(t, agents, nil)
-	a, _ := testApp(t, srv.URL, agents)
-
-	err := a.handleEffort([]string{"/effort", "low"})
-	if err == nil {
-		t.Fatal("groq accepted an effort")
+func TestInstallErrorsGoToStderr(t *testing.T) {
+	isolate(t)
+	t.Setenv("PATH", t.TempDir())
+	res := runTLC(t, t.TempDir(), "install", "cursor")
+	if res.code != 1 {
+		t.Fatalf("code=%d", res.code)
 	}
-	mustContain(t, "error", err.Error(), "no reasoning control")
-}
-
-func TestCompleteArgumentOffersWorkspaceWords(t *testing.T) {
-	agents := testAgents()
-	agents = append(agents, api.Agent{ID: "agent-2", Codename: "lil-coder", Model: "openai:gpt-6-sol"})
-	a, _ := testApp(t, "http://127.0.0.1:1", agents)
-	a.models = &api.ModelsResponse{Providers: testProviders(), Models: testCatalog()}
-
-	got := a.completeArgument("/agent", "sig")
-	if len(got) != 1 || got[0] != "sigma" {
-		t.Fatalf("agent completion = %v", got)
-	}
-	got = a.completeArgument("/agent", "")
-	if len(got) != 3 || got[0] != "new" {
-		t.Fatalf("agent completion (empty) = %v", got)
-	}
-	// only available catalog entries complete
-	got = a.completeArgument("/model", "openai:")
-	if len(got) != 1 || got[0] != "openai:gpt-6-sol" {
-		t.Fatalf("model completion = %v", got)
-	}
-	got = a.completeArgument("/model gemini:gemini-3.8-flash", "hi")
-	if len(got) != 1 || got[0] != "high" {
-		t.Fatalf("model effort completion = %v", got)
-	}
-	got = a.completeArgument("/effort", "min")
-	if len(got) != 1 || got[0] != "minimal" {
-		t.Fatalf("effort completion = %v", got)
-	}
-	got = a.completeArgument("/permissions", "")
-	if len(got) != 4 || got[0] != "normal" || got[1] != "auto" || got[2] != "plan" || got[3] != "yolo" {
-		t.Fatalf("permission mode completion = %v", got)
-	}
-	got = a.completeArgument("/permissions", "y")
-	if len(got) != 1 || got[0] != "yolo" {
-		t.Fatalf("permission mode completion (y) = %v", got)
-	}
-}
-
-func TestPermissionsCommandSetsCyclesAndCovers(t *testing.T) {
-	a, out := testApp(t, "http://127.0.0.1:1", testAgents())
-
-	// no argument cycles normal → auto → plan → yolo → normal
-	a.handleSlash("/permissions")
-	if a.policy.Mode != permissions.ModeAuto {
-		t.Fatalf("mode = %v, want auto", a.policy.Mode)
-	}
-	a.handleSlash("/permissions")
-	if a.policy.Mode != permissions.ModePlan {
-		t.Fatalf("mode = %v, want plan", a.policy.Mode)
-	}
-	a.handleSlash("/permissions")
-	if a.policy.Mode != permissions.ModeYolo {
-		t.Fatalf("mode = %v, want yolo", a.policy.Mode)
-	}
-	a.handleSlash("/permissions")
-	if a.policy.Mode != permissions.ModeAsk {
-		t.Fatalf("mode = %v, want normal", a.policy.Mode)
-	}
-
-	// explicit words and prefixes
-	a.handleSlash("/permissions auto")
-	if a.policy.Mode != permissions.ModeAuto {
-		t.Fatalf("mode = %v, want auto", a.policy.Mode)
-	}
-	a.handleSlash("/permissions yolo")
-	if a.policy.Mode != permissions.ModeYolo {
-		t.Fatalf("mode = %v, want yolo", a.policy.Mode)
-	}
-	a.handleSlash("/permissions norm")
-	if a.policy.Mode != permissions.ModeAsk {
-		t.Fatalf("mode = %v, want normal", a.policy.Mode)
-	}
-	a.handleSlash("/permissions sideways")
-	if a.policy.Mode != permissions.ModeAsk {
-		t.Fatalf("an unknown mode must not change the policy")
-	}
-	mustContain(t, "unknown mode error", out.String(), "unknown permission mode")
-
-	// /yolo toggles between normal and yolo
-	a.handleSlash("/yolo")
-	if a.policy.Mode != permissions.ModeYolo {
-		t.Fatalf("mode = %v, want yolo", a.policy.Mode)
-	}
-	a.handleSlash("/yolo")
-	if a.policy.Mode != permissions.ModeAsk {
-		t.Fatalf("mode = %v, want normal", a.policy.Mode)
+	mustContain(t, "stderr", res.stderr, "not connected")
+	if res.stdout != "" {
+		t.Fatalf("stdout = %q", res.stdout)
 	}
 }

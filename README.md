@@ -1,27 +1,27 @@
 # tlc
 
-**An AI coding agent for your terminal, powered by [turnlith](https://turnlith.com).**
+**Connect your [turnlith](https://turnlith.com) workspace to the coding tools you already use.**
 
-Describe what you want in plain language. `tlc` reads your code, makes the
-changes, and runs your tests — asking before it touches anything.
+`tlc` saves your connection, manages your agents, and wires them into opencode,
+Pi, Continue, Cursor and Cline in one command — then checks that it all works.
 
 ```
-$ tlc
-tlc v0.2.0 · sigma (gemini:gemini-3.8-flash) · ~/code/my-app
-❯ why is the login test flaky?
-
-⏺ Read(internal/auth/login_test.go)
-Looking at the test, the flake comes from a shared clock …
+$ tlc install
+opencode config: ~/.config/opencode/opencode.json (updated)
+provider: tlith → https://turnlith.com/v1
+mcp server: turnlith-controller → https://turnlith.com/v1/mcp (memory search tools)
+agents: 2
+  - sigma (Sigma)
+  - bug-hunter (Bug hunter)
 ```
 
 ## Why tlc
 
-- **Remembers your project.** The agent's memory lives on the turnlith server, so it picks up where you left off — even on another machine.
-- **Your code stays local.** Files are read and edited on your computer; your filesystem is never uploaded.
-- **You stay in control.** Edits and commands need your approval, with a clear diff first. Plan mode keeps the agent read-only while it explores.
-- **Your choice of model.** Use any agent in your turnlith workspace and switch models mid-session.
-- **Built for automation.** One-shot mode with JSON output fits scripts, pipes, and CI.
-- **Works with your other coding clients.** `tlc install` wires your turnlith agents into opencode, Pi, Continue, Cursor and Cline.
+- **One command per client.** `tlc install` detects what you have and writes the right config for each — agents as models, plus the `turnlith-controller` MCP server for memory search.
+- **Edits your configs politely.** JSON configs are changed in place: comments, formatting and your other entries stay untouched. `tlc uninstall` removes exactly what was added, and nothing else.
+- **Safe with your key.** The key is stored mode 600, written atomically, masked in output, and only ever sent over `https://` (or to localhost).
+- **Self-diagnosing.** `tlc doctor` checks the connection, the key, each agent's provider and every coding client, with a fix for each problem.
+- **Scriptable.** Plain output, stdout for data and stderr for errors, meaningful exit codes, shell completions.
 
 ## Install
 
@@ -36,37 +36,40 @@ Supports Linux and macOS (amd64/arm64). Windows builds are on the
 ## Get started
 
 ```sh
-tlc configure --base-url https://turnlith.com   # enter your API key when prompted
-cd your-project
-tlc
+tlc configure --base-url https://turnlith.com   # asks for your API key, verifies it, saves it
+tlc agents                                      # what your workspace has
+tlc install                                     # wire the agents into every client it detects
+tlc doctor                                      # check everything
 ```
 
-Create an API key in the turnlith web console. Type `/help` in a session to see
-what you can do.
+Create an API key in the turnlith web console. Listing agents and `install` work
+with any key; `tlc agents create` needs an admin-role key.
 
-## Everyday use
+## Commands
 
-```sh
-tlc                          # interactive session in the current directory
-tlc "fix the failing test"   # start with a task
-tlc -p "explain main.go"     # one-shot answer for scripts and pipes
-tlc -c                       # continue your last conversation here
-tlc agents                   # list your agents
-tlc doctor                   # diagnose setup problems
-```
+| Command | What it does |
+| --- | --- |
+| `tlc configure` | Save the server URL and API key after verifying them. |
+| `tlc agents` | List the workspace's agents. |
+| `tlc agents create` | Create an agent (asks for what you leave out on a terminal). |
+| `tlc install [client…]` | Wire the agents into coding clients; no name = every detected client. |
+| `tlc uninstall [client…]` | Remove the turnlith entries from those clients. |
+| `tlc doctor` | Diagnose setup problems. |
+| `tlc completion bash\|zsh\|fish` | Print a shell completion script. |
 
-## Safe by default
+`tlc help <command>` shows the options of one command.
 
-`tlc` asks before writing files or running commands. Choose how much freedom to
-give it with four permission modes — `normal`, `auto`, `plan` and `yolo` —
-and set per-project rules in `.tlc/settings.json` to block actions entirely.
-Credential folders such as `~/.ssh` and `~/.aws` are always off limits to its
-file tools. See [SECURITY.md](SECURITY.md) for details.
+## Upgrading from 0.2
+
+`tlc` no longer includes the built-in terminal coding agent (the interactive
+session, `-p`, permission modes, and the file and shell tools). Use one of the
+clients above with your turnlith agents instead — `tlc install` sets that up. See
+the [changelog](CHANGELOG.md).
 
 ## Documentation
 
-- [Reference](docs/reference.md) — permissions, configuration, flags, commands, other coding clients
-- [Architecture](docs/architecture.md) — how it works under the hood
+- [Reference](docs/reference.md) — configuration, commands, flags, supported clients
+- [Architecture](docs/architecture.md) — how it is built
 - [Contributing](CONTRIBUTING.md) — build, test, and extend `tlc`
 - [Security](SECURITY.md) — protections and how to report a vulnerability
 - [Changelog](CHANGELOG.md) — what's new in each release
