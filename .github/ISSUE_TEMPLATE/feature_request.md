@@ -8,7 +8,7 @@ labels: enhancement
 
 **What would you like `tlc` to do?**
 
-**What does it cost?** `tlc` aims to stay small and cheap on context. If this adds a
-tool, a prompt section or a dependency, say why it is worth it.
+**What does it cost?** `tlc` aims to stay small and dependable. If this adds a
+command, a file it writes or a dependency, say why it is worth it.
 
 **Alternatives you considered**

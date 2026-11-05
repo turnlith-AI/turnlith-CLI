@@ -9,6 +9,6 @@
 ## Checklist
 
 - [ ] `make check` passes (gofmt, vet, race tests, cross-platform vet)
-- [ ] Tests cover the change; anything that widens what runs without asking has an adversarial test
+- [ ] Tests cover the change; anything that writes into another tool's config proves that uninstall removes exactly it
 - [ ] README / help text / `CHANGELOG.md` (Unreleased) updated where behavior changed
 - [ ] No new dependency (or the PR explains why one is worth it)
