@@ -14,7 +14,9 @@ Options for create:
       --model     model spec, e.g. gemini:gemini-3.8-flash
       --effort    reasoning effort: none|minimal|low|medium|high|xhigh (when the provider supports it)
 
-Creating agents and changing a model needs an admin-role key; chatting needs an agent-role key.
+Listing agents works with any key; creating one needs an admin-role key (mint it in the
+console under API keys). After creating an agent, run tlc install to add it to your coding
+clients.
 `,
 	"configure": `tlc configure — save the server URL and api key
 
@@ -28,13 +30,13 @@ https:// — plain http is accepted only for localhost, or with TLC_ALLOW_INSECU
 `,
 	"doctor": `tlc doctor — find out why it doesn't work
 
-Checks, in order: the saved connection, the server's health, the api key, the
-selected agent (and whether its provider has credentials), then the local
-environment (terminal, shell, git, ripgrep, config permissions, project
-instructions).
+Checks, in order: the saved connection (and that its URL is safe for an api key),
+the server's health, the api key, whether each agent's provider has credentials
+server-side, the connection file's permissions, then which coding clients tlc
+found on this machine and whether turnlith is wired into each.
 
 Exit status is 1 when something failed, 0 otherwise (warnings do not fail).
-Inside a session, /doctor runs the same checks.
+It works without a usable configuration — that is when you need it most.
 `,
 	"install": `tlc install / uninstall — wire the agents into your coding clients
 
@@ -80,4 +82,15 @@ See: tlc help install
 The scripts are generated from the same flag tables the parser uses, so they
 always match this version.
 `,
+}
+
+// helpTopicNames lists the topics in a stable order, for error messages.
+func helpTopicNames() []string {
+	names := make([]string, 0, len(helpTopics))
+	for _, c := range commands {
+		if _, ok := helpTopics[c]; ok {
+			names = append(names, c)
+		}
+	}
+	return names
 }

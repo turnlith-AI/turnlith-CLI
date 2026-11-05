@@ -2,150 +2,69 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/turnlith-AI/turnlith-CLI/internal/agent"
 	"github.com/turnlith-AI/turnlith-CLI/internal/api"
 	"github.com/turnlith-AI/turnlith-CLI/internal/config"
-	"github.com/turnlith-AI/turnlith-CLI/internal/history"
-	"github.com/turnlith-AI/turnlith-CLI/internal/permissions"
-	"github.com/turnlith-AI/turnlith-CLI/internal/tools"
 	"github.com/turnlith-AI/turnlith-CLI/internal/ui"
 )
 
-// app carries the wired-up session state.
+// console is where a command writes: results to stdout, errors and progress
+// notes to stderr, so a pipeline sees only data.
+type console struct {
+	out, err        *ui.Renderer
+	theme, errTheme *ui.Theme
+}
+
+func newConsole() console {
+	theme, errTheme := ui.NewTheme(), ui.NewThemeFor(os.Stderr)
+	return console{
+		out:      ui.NewRenderer(os.Stdout, theme),
+		err:      ui.NewRenderer(os.Stderr, errTheme),
+		theme:    theme,
+		errTheme: errTheme,
+	}
+}
+
+// app carries the state of a command that talks to the server as the saved
+// connection: `tlc agents` and `tlc agents create`.
 type app struct {
-	opts options
+	opts   options
+	client *api.Client
+	agents []api.Agent
+	con    console
 
-	client   *api.Client
-	agents   []api.Agent
-	agent    api.Agent
-	runner   *agent.Runner
-	policy   *permissions.Policy
-	registry *tools.Registry
-	tracker  *tools.Tracker
-
-	theme       *ui.Theme
-	renderer    *ui.Renderer
-	errRenderer *ui.Renderer
-	repl        *ui.REPL
-
-	// /v1/models cache (agents, catalog, provider capabilities) backing the
-	// model/effort pickers and TAB completion; dropped after mutations.
-	modelsMu sync.Mutex
-	models   *api.ModelsResponse
-
-	cwd        string
-	root       string // project root: the git root above cwd, else cwd
-	transcript *history.Session
-	verbose    bool
-
-	// stats and onEvent serve --output-format: what the last run did, and the
-	// sink for stream-json events (nil in every other mode).
-	stats   runStats
-	onEvent func(map[string]any)
-
-	// pendingNotes are facts for the model's next prompt that did not come from
-	// its own tool calls (the user ran /undo); lastAnswer feeds /copy.
-	pendingNotes []string
-	lastAnswer   string
-
-	// instructions are the TLC.md / AGENTS.md / CLAUDE.md files in the system prompt.
-	instructions []agent.Instructions
-
-	// notes are one-time startup messages (rules loaded or refused), shown
-	// under the banner or on stderr in print mode.
-	notes []string
+	// the prompter is opened on first use and closed with the app
+	prompter *ui.Prompter
 }
 
-// usageError marks a bad invocation (exit status 2) as opposed to a runtime
-// failure (1).
-type usageError struct{ msg string }
+// clientRetryDelays overrides the API client's retry schedule; tests shrink it
+// so a retry does not sleep for real. nil keeps the defaults.
+var clientRetryDelays []time.Duration
 
-func (e *usageError) Error() string { return e.msg }
-
-// projectRuleStore saves "always in this project" answers to the user's own
-// config, keyed by project root.
-type projectRuleStore struct{ root string }
-
-func (s projectRuleStore) SaveAllow(r permissions.Rule) error {
-	return config.AddProjectAllow(s.root, r.String())
+// newClient builds the API client for a connection and makes retries
+// visible: a 429 that takes seconds to clear should not look like a hang.
+func newClient(conn config.Connection, con console) *api.Client {
+	client := api.New(conn.BaseURL, conn.APIKey)
+	if clientRetryDelays != nil {
+		client.SetRetryDelays(clientRetryDelays...)
+	}
+	client.OnRetry = func(attempt int, wait time.Duration, err error) {
+		con.err.Notice(fmt.Sprintf("%s — retrying in %s (attempt %d)", retryReason(err), wait.Round(100*time.Millisecond), attempt))
+	}
+	return client
 }
 
-// setupPermissions applies the mode flags and loads permission rules from
-// every source: --allowed-tools/--disallowed-tools, the user's saved
-// per-project allows, and the repository's shared deny list. A repository can
-// forbid things but never grant itself permissions, so allow rules found in
-// .tlc/settings.json are refused (and counted in a note).
-func (a *app) setupPermissions() error {
-	mode := permissions.ModeAsk
-	switch {
-	case a.opts.permissionMode != "":
-		m, ok := permissions.ParseMode(a.opts.permissionMode)
-		if !ok {
-			return &usageError{fmt.Sprintf("--permission-mode must be normal, auto, plan, or yolo, got %q", a.opts.permissionMode)}
-		}
-		mode = m
-	case a.opts.yolo:
-		mode = permissions.ModeYolo
-	}
-	a.policy.Mode = mode
-	a.policy.Store = projectRuleStore{root: a.root}
-
-	for _, s := range a.opts.allowedTools {
-		r, err := permissions.ParseRule(s)
-		if err != nil {
-			return &usageError{err.Error()}
-		}
-		a.policy.AddAllow(r)
-	}
-	for _, s := range a.opts.disallowedTools {
-		r, err := permissions.ParseRule(s)
-		if err != nil {
-			return &usageError{err.Error()}
-		}
-		a.policy.AddDeny(r)
-	}
-
-	for _, s := range config.LoadPrefs().ProjectAllow(a.root) {
-		r, err := permissions.ParseRule(s)
-		if err != nil {
-			a.notes = append(a.notes, "ignoring an invalid saved permission rule: "+err.Error())
-			continue
-		}
-		a.policy.AddAllow(r)
-	}
-
-	deny, ignored, err := config.LoadProjectDeny(a.root)
-	if err != nil {
-		a.notes = append(a.notes, fmt.Sprintf("could not read %s: %v", config.ProjectSettingsPath(a.root), err))
-	}
-	for _, s := range deny {
-		r, err := permissions.ParseRule(s)
-		if err != nil {
-			a.notes = append(a.notes, "ignoring an invalid deny rule in .tlc/settings.json: "+err.Error())
-			continue
-		}
-		a.policy.AddDeny(r)
-	}
-	if ignored > 0 {
-		a.notes = append(a.notes, fmt.Sprintf("ignored %d allow rule(s) in .tlc/settings.json — a repository cannot grant itself permissions (answer 'p' at a prompt to allow something here yourself)", ignored))
-	}
-	return nil
-}
-
-func newApp(opts options) (*app, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
+// resolveConnection loads the saved connection, applies --base-url/--api-key
+// and refuses an unsafe server URL.
+func resolveConnection(opts options) (config.Connection, error) {
 	conn, err := config.LoadConnection()
 	if err != nil {
-		return nil, err
+		return conn, err
 	}
 	if opts.baseURL != "" {
 		conn.BaseURL = config.NormalizeBaseURL(opts.baseURL)
@@ -155,28 +74,20 @@ func newApp(opts options) (*app, error) {
 		warnAPIKeyFlag()
 	}
 	if err := config.ValidateBaseURL(conn.BaseURL); err != nil {
+		return conn, err
+	}
+	return conn, nil
+}
+
+func newApp(opts options) (*app, error) {
+	conn, err := resolveConnection(opts)
+	if err != nil {
 		return nil, err
 	}
+	con := newConsole()
+	a := &app{opts: opts, client: newClient(conn, con), con: con}
 
-	theme := ui.NewTheme()
-	renderer := ui.NewRenderer(os.Stdout, theme)
-	errRenderer := ui.NewRenderer(os.Stderr, &ui.Theme{Colors: ui.IsTerminal(os.Stderr)})
-
-	client := api.New(conn.BaseURL, conn.APIKey)
-	if clientRetryDelays != nil {
-		client.SetRetryDelays(clientRetryDelays...)
-	}
-	a := &app{
-		opts:        opts,
-		client:      client,
-		theme:       theme,
-		renderer:    renderer,
-		errRenderer: errRenderer,
-		cwd:         cwd,
-		verbose:     opts.verbose,
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	agents, err := a.client.ListAgents(ctx)
 	if err != nil {
@@ -186,91 +97,66 @@ func newApp(opts options) (*app, error) {
 		return nil, fmt.Errorf("this workspace has no agents yet — run `tlc agents create` to make one, or use the console at %s (Agents → New agent)", a.client.BaseURL)
 	}
 	a.agents = agents
-
-	tracker := tools.NewTracker()
-	a.tracker = tracker
-	a.registry = tools.NewRegistry(
-		&tools.ReadTool{Root: cwd, Tracker: tracker},
-		&tools.WriteTool{Root: cwd, Tracker: tracker},
-		&tools.EditTool{Root: cwd, Tracker: tracker},
-		&tools.BashTool{Root: cwd},
-		&tools.GlobTool{Root: cwd},
-		&tools.GrepTool{Root: cwd},
-		&tools.SearchMemoryTool{Client: a.client, Agent: func() string { return a.agent.Codename }},
-		&tools.TodoTool{},
-	)
-	a.policy = &permissions.Policy{}
-	a.root = config.FindProjectRoot(cwd)
-	a.runner = &agent.Runner{
-		Client:   a.client,
-		Tools:    a.registry,
-		Policy:   a.policy,
-		Root:     cwd,
-		MaxSteps: opts.maxTurns,
-	}
-	if err := a.setupPermissions(); err != nil {
-		return nil, err
-	}
-	a.loadInstructions(true)
 	return a, nil
 }
 
 func (a *app) close() {
-	if a.repl != nil {
-		a.repl.Close()
+	if a.prompter != nil {
+		a.prompter.Close()
 	}
-	a.transcript.Close()
 }
 
-// clientRetryDelays overrides the API client's retry schedule; tests shrink it
-// so a retry does not sleep for real. nil keeps the defaults.
-var clientRetryDelays []time.Duration
+// errNoTerminal reports a prompt that needed a person at a terminal.
+var errNoTerminal = errors.New("this needs a terminal")
 
-func (a *app) transcriptPath() string {
-	if a.transcript == nil {
-		return "(none)"
+// prompt returns the app's prompter, opening it on first use. It fails with
+// errNoTerminal unless stdin and stdout are both terminals, so scripts never
+// block waiting for an answer.
+func (a *app) prompt() (*ui.Prompter, error) {
+	if a.prompter != nil {
+		return a.prompter, nil
 	}
-	return a.transcript.Path
+	if !ui.IsTerminal(os.Stdin) || !ui.IsTerminal(os.Stdout) {
+		return nil, errNoTerminal
+	}
+	p, err := ui.NewPrompter(a.con.out, a.con.theme)
+	if err != nil {
+		return nil, err
+	}
+	a.prompter = p
+	return p, nil
 }
 
+// label renders an agent's label for tables, safely.
 func label(ag api.Agent) string {
-	if ag.Label == nil || *ag.Label == "" {
+	if ag.Label == nil || strings.TrimSpace(*ag.Label) == "" {
 		return "-"
 	}
-	return *ag.Label
+	return ui.SanitizeInline(*ag.Label)
 }
 
 func shortPath(p string) string {
 	home, err := os.UserHomeDir()
-	if err == nil && strings.HasPrefix(p, home) {
+	if err == nil && home != "" && strings.HasPrefix(p, home) {
 		return "~" + strings.TrimPrefix(p, home)
 	}
 	return p
 }
 
-// loadInstructions (re)reads the instruction files. announce adds a startup
-// note naming each one, so it is never a surprise what the model was told.
-func (a *app) loadInstructions(announce bool) {
-	a.instructions = agent.LoadInstructions(a.cwd, agent.InstructionsMaxFromEnv())
-	if !announce {
-		return
-	}
-	for _, in := range a.instructions {
-		note := fmt.Sprintf("instructions: %s (%s)", shortPath(in.Path), humanSize(len(in.Text)))
-		if in.Truncated {
-			note += " — truncated to fit; raise " + agent.EnvInstructionsMax + " or trim the file"
-		}
-		a.notes = append(a.notes, note)
+// maskKey shows enough of an api key to recognise it: the prefix and last four
+// characters of a long key, only a few leading characters of a short one.
+func maskKey(key string) string {
+	switch {
+	case len(key) > 16:
+		return key[:6] + "…" + key[len(key)-4:]
+	case len(key) > 4:
+		return key[:3] + "…"
+	default:
+		return "…"
 	}
 }
 
-// refreshSystemPrompt rebuilds the system prompt for the current agent.
-func (a *app) refreshSystemPrompt() {
-	a.runner.SystemPrompt = agent.SystemPrompt(agent.PromptEnv{
-		Cwd:           a.cwd,
-		Agent:         a.agent.Codename,
-		Model:         a.agent.Model,
-		HasMemoryTool: true,
-		Instructions:  a.instructions,
-	})
+// warnAPIKeyFlag explains why --api-key is the least safe way to pass a key.
+func warnAPIKeyFlag() {
+	fmt.Fprintln(os.Stderr, "tlc: warning: --api-key is visible to other users in the process list; prefer TLITH_API_KEY, `tlc configure`, or --api-key-stdin")
 }

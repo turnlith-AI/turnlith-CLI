@@ -1,5 +1,7 @@
 #!/bin/sh
-# tlc installer: downloads a prebuilt binary from GitHub releases.
+# tlc installer: downloads a prebuilt binary from GitHub releases. tlc connects
+# your turnlith workspace to your coding tools (opencode, Pi, Continue, Cursor,
+# Cline).
 #
 #   curl -fsSL https://raw.githubusercontent.com/turnlith-AI/turnlith-CLI/main/install.sh | sh
 #
@@ -7,7 +9,8 @@
 #   TLC_VERSION      install a specific tag (default: the latest release)
 #   TLC_INSTALL_DIR  destination directory (default: ~/.local/bin)
 #   TLITH_API_KEY    when set, configure the connection after installing
-#                    (passed via the environment, never the download URL)
+#                    (passed via the environment and piped to tlc on stdin:
+#                    never in a URL or in the process list)
 #   TLITH_BASE_URL   server URL for that configuration (default:
 #                    https://turnlith.com)
 set -eu
@@ -91,8 +94,9 @@ if [ -n "${TLITH_API_KEY:-}" ]; then
   base="${TLITH_BASE_URL:-https://turnlith.com}"
   say ""
   say "configuring tlc for $base"
-  if ! "$INSTALL_DIR/$BIN" configure --base-url "$base" --api-key "$TLITH_API_KEY"; then
-    die "configure failed — run \`tlc configure --base-url $base --api-key <key>\` yourself"
+  if ! printf '%s\n' "$TLITH_API_KEY" |
+    "$INSTALL_DIR/$BIN" configure --base-url "$base" --api-key-stdin; then
+    die "configure failed — run \`tlc configure --base-url $base\` yourself (it asks for the key)"
   fi
   # Wire whichever coding clients are installed (opencode, pi, continue,
   # cursor, cline). A failure here is not fatal: tlc is installed and
@@ -100,9 +104,9 @@ if [ -n "${TLITH_API_KEY:-}" ]; then
   if ! "$INSTALL_DIR/$BIN" install --if-detected; then
     say "warning: could not wire every coding client — run \`tlc install\` yourself (\`tlc install --list\` shows what is detected)"
   fi
-  say "next: run \`tlc\`, or open a wired coding client and pick a turnlith agent"
+  say "next: open a wired coding client and pick a turnlith agent (\`tlc doctor\` checks the setup)"
 else
-  say "next: tlc configure --base-url <server> --api-key sk-…"
+  say "next: tlc configure --base-url <server>   (it asks for your api key), then tlc install"
 fi
 
 if command -v tlith >/dev/null 2>&1; then

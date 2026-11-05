@@ -12,48 +12,36 @@ import (
 // flagHelp describes every long flag for the shells that show descriptions
 // (zsh, fish). A test fails when a flag is added to the parser without one.
 var flagHelp = map[string]string{
-	"--help":             "show help (also per command)",
-	"--version":          "print the version",
-	"--print":            "non-interactive: answer on stdout, activity on stderr",
-	"--continue":         "continue the previous conversation in this directory",
-	"--yolo":             "run every gated tool without asking",
-	"--verbose":          "show token usage after each turn",
-	"--project":          "install: write the project-level config instead of the user config",
-	"--no-mcp":           "install: skip the turnlith-controller MCP server",
-	"--use-env":          "install: reference $TLITH_API_KEY instead of embedding the key",
-	"--list":             "install: show the clients and what is installed, change nothing",
-	"--if-detected":      "install: exit quietly when no client is detected",
-	"--api-key-stdin":    "configure: read the api key from stdin",
-	"--agent":            "agent codename to talk to",
-	"--name":             "agents create: codename",
-	"--label":            "agents create: human-readable label",
-	"--model":            "agents create: model spec, e.g. gemini:gemini-3.8-flash",
-	"--effort":           "agents create: reasoning effort",
-	"--provider-id":      "install: provider key in the client config",
-	"--base-url":         "server URL for this run",
-	"--api-key":          "api key for this run (visible in ps; prefer the environment)",
-	"--allowed-tools":    "permission rules to allow, comma separated",
-	"--disallowed-tools": "permission rules to deny, comma separated",
-	"--permission-mode":  "what asks first: normal, auto, plan, yolo",
-	"--max-turns":        "print mode: stop after this many model turns",
-	"--output-format":    "print mode: text, json or stream-json",
+	"--help":          "show help (also per command)",
+	"--version":       "print the version",
+	"--project":       "install: write the project-level config instead of the user config",
+	"--no-mcp":        "install: skip the turnlith-controller MCP server",
+	"--use-env":       "install: reference $TLITH_API_KEY instead of embedding the key",
+	"--list":          "install: show the clients and what is installed, change nothing",
+	"--if-detected":   "install: exit quietly when no client is detected",
+	"--api-key-stdin": "configure: read the api key from stdin",
+	"--name":          "agents create: codename",
+	"--label":         "agents create: human-readable label",
+	"--model":         "agents create: model spec, e.g. gemini:gemini-3.8-flash",
+	"--effort":        "agents create: reasoning effort",
+	"--provider-id":   "install: provider key in the client config",
+	"--base-url":      "server URL for this run",
+	"--api-key":       "api key for this run (visible in ps; prefer the environment)",
 }
 
 // flagValues lists the fixed choices of value flags.
 var flagValues = map[string][]string{
-	"--permission-mode": {"normal", "auto", "plan", "yolo"},
-	"--output-format":   {"text", "json", "stream-json"},
-	"--effort":          {"none", "minimal", "low", "medium", "high", "xhigh"},
+	"--effort": {"none", "minimal", "low", "medium", "high", "xhigh"},
 }
 
-var shortFlags = map[string]string{"--print": "-p", "--continue": "-c", "--help": "-h", "--version": "-v"}
+var shortFlags = map[string]string{"--help": "-h", "--version": "-v"}
 
 type commandInfo struct{ name, help string }
 
 var topCommands = []commandInfo{
 	{"agents", "list or create the workspace's agents"},
 	{"configure", "save the server URL and api key"},
-	{"doctor", "check the connection, key, agent and local tools"},
+	{"doctor", "check the connection, key, agents and coding clients"},
 	{"install", "wire the agents into coding clients (opencode, pi, continue, cursor, cline)"},
 	{"uninstall", "remove the turnlith entries from those clients"},
 	{"completion", "print a shell completion script"},

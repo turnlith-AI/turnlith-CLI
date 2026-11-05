@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +15,7 @@ import (
 // command surface end to end: flags, connection, file writes, idempotence,
 // uninstall.
 func TestInstallAndUninstallOpencode(t *testing.T) {
-	srv := newMockServer(t, testAgents(), nil)
+	srv := newMockServer(t, testAgents())
 	setupEnv(t, srv.URL)
 
 	dir := t.TempDir()
@@ -67,7 +70,7 @@ func TestInstallAndUninstallOpencode(t *testing.T) {
 }
 
 func TestInstallUseEnvOmitsKey(t *testing.T) {
-	srv := newMockServer(t, testAgents(), nil)
+	srv := newMockServer(t, testAgents())
 	setupEnv(t, srv.URL)
 
 	dir := t.TempDir()
@@ -117,7 +120,7 @@ func readOC(t *testing.T) []byte {
 // the test creates.
 func clientEnv(t *testing.T) (srv *mockServer, home string) {
 	t.Helper()
-	srv = newMockServer(t, testAgents(), nil)
+	srv = newMockServer(t, testAgents())
 	setupEnv(t, srv.URL)
 	home = os.Getenv("HOME")
 	t.Setenv("USERPROFILE", home)
@@ -191,24 +194,48 @@ func TestInstallNothingDetected(t *testing.T) {
 	if res.code != 0 || strings.TrimSpace(res.stdout+res.stderr) != "" {
 		t.Errorf("--if-detected: exit=%d output=%q, want a silent success", res.code, res.stdout+res.stderr)
 	}
-	if srv.modelsHits != 0 {
+	if srv.hits() != 0 {
 		t.Error("nothing to install, so the server must not be contacted")
 	}
 }
 
-func TestInstallMCPOnlyClientsSkipTheAgentList(t *testing.T) {
+func TestInstallMCPOnlyClientsStillListTheAgents(t *testing.T) {
 	srv, home := clientEnv(t)
 	res := runTLC(t, t.TempDir(), "install", "cursor")
 	if res.code != 0 {
 		t.Fatalf("exit = %d\n%s%s", res.code, res.stdout, res.stderr)
 	}
-	if srv.modelsHits != 0 {
-		t.Errorf("an MCP-only install listed the agents (%d requests)", srv.modelsHits)
+	if srv.hits() != 1 {
+		t.Errorf("the agents must be listed once, even for an MCP-only client (%d requests)", srv.hits())
 	}
 	mustContain(t, "stdout", res.stdout, "Settings → Models")
 	mustContain(t, "stdout", res.stdout, srv.URL+"/v1")
+	mustContain(t, "stdout", res.stdout, "add a custom model named sigma (Sigma)")
+	mustNotContain(t, "stdout", res.stdout, "no agents on the server yet")
 	if !exists(filepath.Join(home, ".cursor", "mcp.json")) {
 		t.Error("mcp.json was not written")
+	}
+}
+
+func TestInstallVerifiesTheKeyBeforeWritingAnything(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"Invalid API key"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	isolate(t)
+	t.Setenv("TLITH_BASE_URL", srv.URL)
+	t.Setenv("TLITH_API_KEY", "sk-typo")
+	t.Setenv("PATH", t.TempDir())
+	home := os.Getenv("HOME")
+
+	res := runTLC(t, t.TempDir(), "install", "cursor")
+	if res.code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s%s", res.code, res.stdout, res.stderr)
+	}
+	mustContain(t, "stderr", res.stderr, "authentication failed")
+	if exists(filepath.Join(home, ".cursor", "mcp.json")) {
+		t.Fatal("a key the server rejected was written into the client config")
 	}
 }
 
@@ -289,7 +316,7 @@ func TestInstallList(t *testing.T) {
 	if res := runTLC(t, t.TempDir(), "install", "cursor"); res.code != 0 {
 		t.Fatalf("setup install failed: %s%s", res.stdout, res.stderr)
 	}
-	hits := srv.modelsHits
+	hits := srv.hits()
 	res := runTLC(t, t.TempDir(), "install", "--list")
 	if res.code != 0 {
 		t.Fatalf("exit = %d\n%s%s", res.code, res.stdout, res.stderr)
@@ -300,7 +327,7 @@ func TestInstallList(t *testing.T) {
 		"no Cline install found"} {
 		mustContain(t, "--list", res.stdout, want)
 	}
-	if srv.modelsHits != hits {
+	if srv.hits() != hits {
 		t.Error("--list must work offline")
 	}
 	res = runTLC(t, t.TempDir(), "install", "--list", "--project")
