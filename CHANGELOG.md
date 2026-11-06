@@ -5,10 +5,12 @@ versions follow [semantic versioning](https://semver.org/) (pre-1.0: minor versi
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-06
+
 `tlc` is now a **setup and control CLI** for a turnlith workspace. The built-in
 terminal coding agent is gone; use your turnlith agents from opencode, Pi,
-Continue, Cursor or Cline instead (`tlc install` wires them up). Because 0.2.0 is
-the last release that includes the agent, the next release should be 0.3.0.
+Continue, Cursor or Cline instead (`tlc install` wires them up). 0.2.x is the
+last line that includes the agent.
 
 ### Removed (breaking)
 - **The coding agent**: the interactive session, `tlc "prompt"`, print mode (`-p`, `--output-format`, `--max-turns`), `-c` / `/resume`, the `Read`/`Write`/`Edit`/`Bash`/`Glob`/`Grep`/`SearchMemory`/`TodoWrite` tools, permission modes and rules (`--yolo`, `--permission-mode`, `--allowed-tools`, `--disallowed-tools`, `.tlc/settings.json`), project instruction files (`TLC.md`), slash commands, `@file` mentions, local transcripts and the default-agent preference (`--agent`, `TLC_AGENT`, `tlc.json`).
@@ -51,6 +53,7 @@ the last release that includes the agent, the next release should be 0.3.0.
 - First release: a terminal coding agent backed by a turnlith server — streaming answers, local `Read`/`Write`/`Edit`/`Bash`/`Glob`/`Grep` tools behind permission prompts, server-side `SearchMemory`, local transcripts.
 - Prebuilt binaries for Linux, macOS and Windows with an installer script; the config path matches the `tlith` CLI's.
 
-[Unreleased]: https://github.com/turnlith-AI/turnlith-CLI/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/turnlith-AI/turnlith-CLI/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/turnlith-AI/turnlith-CLI/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/turnlith-AI/turnlith-CLI/releases/tag/v0.2.0
 [0.1.0]: https://github.com/turnlith-AI/turnlith-CLI/releases/tag/v0.1.0
